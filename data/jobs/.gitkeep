@@ -1,0 +1,2 @@
+# Run snapshots are persisted here as data/jobs/<job_id>.json
+# This file just keeps the directory in version control.

@@ -1,0 +1,16 @@
+# Local Python
+backend/.venv/
+**/__pycache__/
+*.pyc
+
+# MSAL cached tokens (NEVER commit — contains a refresh token for your account)
+.msal_cache.bin
+
+# Persisted run snapshots (machine-local; can be large)
+data/jobs/*.json
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

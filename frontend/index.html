@@ -1,0 +1,2222 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Azure Quota Dashboard</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+<style>
+  :root { color-scheme: dark; }
+  body { font-family: -apple-system, "Segoe UI", Roboto, Inter, sans-serif; }
+  .glow { box-shadow: 0 0 24px -8px rgba(56,189,248,.45); }
+  .scrollable { max-height: 420px; overflow-y: auto; }
+  .pill { display:inline-flex; align-items:center; padding:2px 8px; border-radius:9999px; font-size:11px; font-weight:600;}
+  .bar-track { background:#1f2937; border-radius:4px; overflow:hidden; height:8px; }
+  .bar-fill { height:100%; transition: width .4s ease;}
+  .pct-lo { background:linear-gradient(90deg,#10b981,#34d399); }
+  .pct-mid{ background:linear-gradient(90deg,#f59e0b,#fbbf24); }
+  .pct-hi { background:linear-gradient(90deg,#ef4444,#f87171); }
+  tbody tr:hover { background:rgba(59,130,246,.08); }
+  .spinner { border:2px solid rgba(255,255,255,.15); border-top-color:#38bdf8; border-radius:50%; width:14px; height:14px; animation:spin .8s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg);} }
+  details > summary { cursor:pointer; list-style:none;}
+  details > summary::-webkit-details-marker { display:none;}
+  .guid { font-size:10px; line-height:1.2; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color:#64748b; }
+  .delta-pos { color:#34d399; }
+  .delta-neg { color:#fb7185; }
+  .delta-zero{ color:#64748b; }
+</style>
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen">
+
+<header class="border-b border-slate-800 bg-slate-900/60 backdrop-blur sticky top-0 z-10">
+  <div class="max-w-7xl mx-auto px-6 py-3 flex items-center gap-4">
+    <div class="text-xl font-bold tracking-tight">
+      <span class="text-sky-400">⚡</span> Azure Quota Dashboard
+      <span class="text-slate-500 text-sm font-normal ml-2">via Azure Resource Manager</span>
+    </div>
+    <div class="ml-auto flex items-center gap-3 text-sm">
+      <span id="auth-state" class="text-slate-400">checking auth…</span>
+      <button id="btn-auth" class="px-3 py-1.5 rounded-md bg-sky-600 hover:bg-sky-500 text-white text-xs font-semibold">Sign in</button>
+    </div>
+  </div>
+</header>
+
+<!-- Auth Modal -->
+<div id="auth-modal" class="hidden fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
+  <div class="bg-slate-900 border border-slate-700 rounded-xl max-w-lg w-full p-6 space-y-5 shadow-2xl">
+    <div class="flex items-center justify-between">
+      <h2 class="text-lg font-bold">Sign in to Azure</h2>
+      <button onclick="closeAuth()" class="text-slate-400 hover:text-white text-xl leading-none">×</button>
+    </div>
+
+    <div id="auth-pick" class="space-y-3">
+      <p class="text-xs text-slate-400">Sign in once to mint a token for ARM (<code class="text-sky-400">management.azure.com</code>). The dashboard never sees your password and only reads quota / VM metadata.</p>
+
+      <button id="m-az" class="w-full text-left bg-slate-800 hover:bg-slate-700 rounded-lg p-3 border border-slate-700">
+        <div class="font-semibold text-sky-400">⚡ Azure CLI <span id="m-az-tag" class="text-[10px] uppercase tracking-wider text-emerald-400 ml-1"></span></div>
+        <div class="text-xs text-slate-400 mt-1">Fast. Requires <code>az login</code> on this machine. Uses your already-cached creds.</div>
+      </button>
+
+      <button id="m-dev" class="w-full text-left bg-slate-800 hover:bg-slate-700 rounded-lg p-3 border border-slate-700">
+        <div class="font-semibold text-indigo-400">📱 Device code</div>
+        <div class="text-xs text-slate-400 mt-1">Browser-based sign-in via <code>microsoft.com/devicelogin</code>. No redirect URI needed.</div>
+      </button>
+
+      <button id="m-paste" class="w-full text-left bg-slate-800 hover:bg-slate-700 rounded-lg p-3 border border-slate-700">
+        <div class="font-semibold text-amber-400">📋 Paste bearer token</div>
+        <div class="text-xs text-slate-400 mt-1">Grab a token from DevTools on <code>lionrock.azurefd.net</code> (Network → any request → Authorization header).</div>
+      </button>
+    </div>
+
+    <!-- Device code panel -->
+    <div id="auth-dev" class="hidden space-y-3">
+      <div class="text-sm">Go to <a id="dev-url" href="#" target="_blank" class="text-sky-400 underline">microsoft.com/devicelogin</a> and enter:</div>
+      <div class="flex items-center gap-2">
+        <code id="dev-code" class="flex-1 text-3xl font-mono font-bold tracking-widest bg-slate-950 border border-slate-700 rounded-md py-3 text-center select-all"></code>
+        <button id="dev-copy" class="px-3 py-3 rounded-md bg-slate-800 hover:bg-slate-700 text-xs font-semibold">Copy</button>
+      </div>
+      <div id="dev-status" class="text-xs text-slate-400 flex items-center gap-2"><span class="spinner"></span><span>Waiting for sign-in…</span></div>
+    </div>
+
+    <!-- Paste panel -->
+    <div id="auth-paste" class="hidden space-y-3">
+      <div class="text-xs text-slate-400 space-y-1">
+        <div>1. Open <code>https://lionrock.azurefd.net/quota/create-request</code> in another tab and sign in.</div>
+        <div>2. F12 → Network → click any <code>lionrock-prod.microsoftlionrock.com</code> request.</div>
+        <div>3. Copy the <code>authorization</code> request header value (starts with <code>Bearer eyJ…</code>).</div>
+      </div>
+      <textarea id="paste-input" rows="5" placeholder="Bearer eyJ0eXAiOiJKV1Q..." class="w-full bg-slate-950 border border-slate-700 rounded-md p-2 text-xs font-mono focus:border-sky-500 outline-none"></textarea>
+      <div class="flex gap-2">
+        <button id="paste-submit" class="flex-1 px-4 py-2 rounded-md bg-amber-600 hover:bg-amber-500 text-white text-sm font-semibold">Use this token</button>
+        <button id="paste-back" class="px-4 py-2 rounded-md bg-slate-800 hover:bg-slate-700 text-sm">Back</button>
+      </div>
+      <div id="paste-err" class="hidden text-xs text-rose-400"></div>
+    </div>
+
+    <!-- Generic error -->
+    <div id="auth-err" class="hidden text-xs text-rose-400 border border-rose-800/40 bg-rose-950/30 rounded p-2"></div>
+  </div>
+</div>
+
+<!-- Sub picker modal -->
+<div id="picker-modal" class="hidden fixed inset-0 z-40 bg-black/70 backdrop-blur-sm flex items-center justify-center p-6">
+  <div class="bg-slate-900 border border-slate-700 rounded-xl w-full max-w-3xl max-h-[80vh] flex flex-col shadow-2xl">
+    <div class="p-4 border-b border-slate-800 flex items-center gap-3">
+      <div class="font-semibold">Pick subscriptions</div>
+      <input id="picker-search" placeholder="filter by name or GUID…" class="ml-auto bg-slate-950 border border-slate-700 rounded-md px-3 py-1.5 text-xs w-64 focus:border-sky-500 outline-none" />
+      <button id="picker-all" class="text-xs px-2 py-1 rounded bg-slate-800 hover:bg-slate-700">Select all visible</button>
+      <button id="picker-none" class="text-xs px-2 py-1 rounded bg-slate-800 hover:bg-slate-700">Clear</button>
+    </div>
+    <div id="picker-list" class="flex-1 overflow-auto p-2 text-xs font-mono"></div>
+    <div class="p-3 border-t border-slate-800 flex items-center gap-3 text-xs">
+      <div class="text-slate-400"><span id="picker-selected">0</span> selected</div>
+      <button id="picker-apply" class="ml-auto px-4 py-2 rounded-md bg-gradient-to-r from-sky-500 to-indigo-500 hover:from-sky-400 hover:to-indigo-400 text-white font-semibold">Apply</button>
+      <button id="picker-cancel" class="px-4 py-2 rounded-md bg-slate-800 hover:bg-slate-700">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<main class="max-w-7xl mx-auto px-6 py-6 space-y-6">
+
+  <!-- Controls -->
+  <section class="bg-slate-900/60 border border-slate-800 rounded-xl p-5">
+    <div class="flex flex-wrap items-end gap-4">
+      <div>
+        <label class="block text-xs uppercase tracking-wider text-slate-400 mb-1">Region</label>
+        <input id="region" value="eastus" list="region-list" class="bg-slate-950 border border-slate-700 rounded-md px-3 py-2 w-44 text-sm focus:border-sky-500 outline-none" />
+        <datalist id="region-list">
+          <option>eastus</option><option>eastus2</option><option>centralus</option>
+          <option>westus</option><option>westus2</option><option>westus3</option>
+          <option>southcentralus</option><option>northcentralus</option>
+          <option>westeurope</option><option>northeurope</option>
+          <option>southeastasia</option><option>eastasia</option>
+          <option>australiaeast</option><option>uksouth</option>
+        </datalist>
+      </div>
+      <div>
+        <label class="block text-xs uppercase tracking-wider text-slate-400 mb-1">Service</label>
+        <select id="service" class="bg-slate-950 border border-slate-700 rounded-md px-3 py-2 w-32 text-sm focus:border-sky-500 outline-none">
+          <option value="compute" selected>compute</option>
+          <option value="network">network</option>
+          <option value="storage">storage</option>
+          <option value="batch">batch</option>
+          <option value="hdi">hdi</option>
+        </select>
+      </div>
+      <div>
+        <label class="block text-xs uppercase tracking-wider text-slate-400 mb-1">Throttle</label>
+        <input id="throttle" type="number" value="10" min="1" max="40" class="bg-slate-950 border border-slate-700 rounded-md px-3 py-2 w-20 text-sm focus:border-sky-500 outline-none" />
+      </div>
+      <div>
+        <label class="block text-xs uppercase tracking-wider text-slate-400 mb-1">Subs visible to your account</label>
+        <div class="text-sm">
+          <span id="sub-count" class="font-semibold text-2xl text-sky-400">—</span>
+          <span class="text-slate-400 ml-2">subscriptions</span>
+          <span id="sub-matched" class="hidden ml-2 text-emerald-400 font-semibold"></span>
+        </div>
+      </div>
+      <div>
+        <label class="block text-xs uppercase tracking-wider text-slate-400 mb-1">Filter subs (name contains)</label>
+        <div class="flex items-center gap-2">
+          <input id="sub-filter" placeholder="e.g. prod, dev, eastus…" class="bg-slate-950 border border-slate-700 rounded-md px-3 py-2 text-sm w-56 focus:border-sky-500 outline-none" />
+          <button id="btn-sub-picker" type="button" class="px-3 py-2 rounded-md bg-slate-800 hover:bg-slate-700 text-xs" title="Pick specific subs">Pick…</button>
+        </div>
+        <label class="flex items-center gap-1.5 text-[11px] text-slate-400 mt-1 cursor-pointer select-none">
+          <input id="skip-gov" type="checkbox" class="accent-sky-500"> skip USGov-named (UPPER_SNAKE_CASE)
+        </label>
+      </div>
+      <div class="ml-auto flex items-center gap-2">
+        <select id="past-runs" class="bg-slate-950 border border-slate-700 rounded-md px-3 py-2 text-xs max-w-[260px]" title="Load a previous run from disk">
+          <option value="">📂 Past runs…</option>
+        </select>
+        <button id="btn-load" class="hidden px-3 py-2 rounded-md bg-slate-800 hover:bg-slate-700 text-xs font-semibold">Load</button>
+        <button id="btn-delete" class="hidden px-2 py-2 rounded-md bg-rose-900/60 hover:bg-rose-800 text-xs" title="Delete this run">🗑</button>
+        <select id="compare-to" class="bg-slate-950 border border-slate-700 rounded-md px-3 py-2 text-xs max-w-[260px]" title="Compare current run against a prior run — Δ will be shown in tables and KPIs">
+          <option value="">⇄ Compare to: none</option>
+          <option value="__prev__" selected>⇄ Compare to: previous run (auto)</option>
+        </select>
+        <span id="compare-status" class="hidden text-[11px] text-sky-300"></span>
+        <button id="btn-run" class="px-5 py-2.5 rounded-md bg-gradient-to-r from-sky-500 to-indigo-500 hover:from-sky-400 hover:to-indigo-400 text-white font-semibold text-sm glow disabled:opacity-50 disabled:cursor-not-allowed">
+          ▶ Run Quota Check
+        </button>
+        <div class="flex items-center gap-1 bg-slate-950/70 border border-slate-700 rounded-md px-2 py-1.5 text-xs">
+          <label class="flex items-center gap-1.5 cursor-pointer select-none text-slate-300" title="Re-run automatically on the chosen interval">
+            <input id="auto-refresh" type="checkbox" class="accent-emerald-500">
+            <span>Auto</span>
+          </label>
+          <select id="auto-refresh-interval" class="bg-transparent border-0 text-slate-200 text-xs focus:outline-none">
+            <option value="5">5m</option>
+            <option value="15" selected>15m</option>
+            <option value="30">30m</option>
+            <option value="60">1h</option>
+            <option value="240">4h</option>
+            <option value="1440">24h</option>
+          </select>
+          <span id="auto-refresh-next" class="text-[10px] text-slate-500 hidden ml-1"></span>
+        </div>
+        <button id="btn-export" class="hidden px-4 py-2.5 rounded-md bg-slate-800 hover:bg-slate-700 text-sm font-semibold">⤓ CSV</button>
+      </div>
+    </div>
+
+    <!-- Progress -->
+    <div id="progress-wrap" class="hidden mt-5">
+      <div class="flex items-center justify-between text-xs text-slate-400 mb-1">
+        <span><span class="spinner inline-block mr-2 align-middle"></span><span id="progress-label">Fan-out in progress…</span></span>
+        <span><b id="progress-done">0</b> / <b id="progress-total">0</b> · elapsed <b id="progress-elapsed">0s</b></span>
+      </div>
+      <div class="bar-track h-2"><div id="progress-bar" class="bar-fill pct-lo" style="width:0%"></div></div>
+      <div class="mt-2 text-xs text-slate-500 scrollable" id="progress-log"></div>
+    </div>
+  </section>
+
+  <!-- KPIs -->
+  <section id="kpis" class="hidden grid grid-cols-2 md:grid-cols-5 gap-3">
+    <div class="bg-slate-900/60 border border-slate-800 rounded-xl p-4">
+      <div class="text-xs text-slate-400 uppercase tracking-wider">Subs returned</div>
+      <div id="k-subs" class="text-2xl font-bold mt-1">—</div>
+      <div id="k-subs-d" class="text-[11px] mt-0.5 text-slate-500"></div>
+    </div>
+    <div class="bg-slate-900/60 border border-slate-800 rounded-xl p-4">
+      <div class="text-xs text-slate-400 uppercase tracking-wider">VM families</div>
+      <div id="k-fams" class="text-2xl font-bold mt-1">—</div>
+      <div id="k-fams-d" class="text-[11px] mt-0.5 text-slate-500"></div>
+    </div>
+    <div class="bg-slate-900/60 border border-slate-800 rounded-xl p-4">
+      <div class="text-xs text-slate-400 uppercase tracking-wider">Total cores used</div>
+      <div id="k-used" class="text-2xl font-bold mt-1 text-sky-400">—</div>
+      <div id="k-used-d" class="text-[11px] mt-0.5 text-slate-500"></div>
+      <div id="k-used-hint" class="text-[10px] mt-0.5 text-slate-600"></div>
+    </div>
+    <div class="bg-slate-900/60 border border-slate-800 rounded-xl p-4">
+      <div class="text-xs text-slate-400 uppercase tracking-wider">Total cores quota</div>
+      <div id="k-quota" class="text-2xl font-bold mt-1 text-emerald-400">—</div>
+      <div id="k-quota-d" class="text-[11px] mt-0.5 text-slate-500"></div>
+      <div id="k-quota-hint" class="text-[10px] mt-0.5 text-slate-600"></div>
+    </div>
+    <div class="bg-slate-900/60 border border-slate-800 rounded-xl p-4">
+      <div class="text-xs text-slate-400 uppercase tracking-wider">Overall % used</div>
+      <div id="k-pct" class="text-2xl font-bold mt-1">—</div>
+      <div id="k-pct-d" class="text-[11px] mt-0.5 text-slate-500"></div>
+    </div>
+  </section>
+
+  <!-- Charts -->
+  <section id="charts" class="hidden grid grid-cols-1 lg:grid-cols-2 gap-4">
+    <div class="bg-slate-900/60 border border-slate-800 rounded-xl p-4">
+      <div class="flex justify-between items-center mb-2">
+        <div class="font-semibold">Top 15 VM families — utilization</div>
+        <div class="flex items-center gap-2 text-xs text-slate-400">
+          <label>sort:</label>
+          <select id="fam-sort" class="bg-slate-950 border border-slate-700 rounded px-2 py-1">
+            <option value="quota" selected>Quota</option>
+            <option value="used">Used</option>
+            <option value="pct">% used</option>
+          </select>
+        </div>
+      </div>
+      <canvas id="chart-families" height="220"></canvas>
+    </div>
+    <div class="bg-slate-900/60 border border-slate-800 rounded-xl p-4">
+      <div class="flex justify-between items-center mb-2">
+        <div class="font-semibold">Subs by max % used</div>
+        <div class="text-xs text-slate-400">drill the hot ones</div>
+      </div>
+      <canvas id="chart-subs" height="220"></canvas>
+    </div>
+    <div class="lg:col-span-2 bg-slate-900/60 border border-slate-800 rounded-xl p-4">
+      <div class="flex justify-between items-center mb-2 flex-wrap gap-2">
+        <div class="font-semibold">Compute quota by subscription — stacked by family <span class="ml-2 text-[10px] text-slate-500 font-normal">(click a bar to zoom)</span></div>
+        <div class="flex items-center gap-2 text-xs text-slate-400">
+          <label>metric:</label>
+          <select id="sub-metric" class="bg-slate-950 border border-slate-700 rounded px-2 py-1">
+            <option value="quota" selected>Quota</option>
+            <option value="used">Used</option>
+          </select>
+          <label class="ml-2">families:</label>
+          <select id="sub-topn" class="bg-slate-950 border border-slate-700 rounded px-2 py-1">
+            <option value="8">top 8 + other</option>
+            <option value="12" selected>top 12 + other</option>
+            <option value="20">top 20 + other</option>
+            <option value="0">all</option>
+          </select>
+          <label class="ml-2 flex items-center gap-1.5 cursor-pointer select-none">
+            <input id="hide-defaults" type="checkbox" class="accent-sky-500" checked>
+            hide default-only (quota=0 or 350)
+          </label>
+        </div>
+      </div>
+      <div id="focus-bar" class="hidden mb-2 px-3 py-2 rounded-md bg-sky-950/40 border border-sky-800/40 flex items-center gap-3">
+        <span id="focus-bar-text" class="text-xs flex-1 min-w-0 truncate"></span>
+        <button onclick="clearFocus()" class="px-3 py-1 rounded bg-slate-800 hover:bg-slate-700 text-xs whitespace-nowrap">← Back to all subs</button>
+      </div>
+      <canvas id="chart-sub-fam" height="320"></canvas>
+    </div>
+  </section>
+
+  <!-- Regional rollups (on-demand + spot per sub) -->
+  <section id="rollups-section" class="hidden bg-slate-900/60 border border-slate-800 rounded-xl mb-6">
+    <div class="p-4 flex flex-wrap items-center gap-3 border-b border-slate-800">
+      <div class="font-semibold">Regional rollups · on-demand vs spot per subscription</div>
+      <label class="ml-auto flex items-center gap-1.5 cursor-pointer select-none text-xs">
+        <input id="rollup-hide-zero" type="checkbox" class="accent-sky-500" checked>
+        hide subs with zero usage
+      </label>
+      <label class="flex items-center gap-1.5 cursor-pointer select-none text-xs">
+        <input id="rollup-sort-spot" type="checkbox" class="accent-sky-500">
+        sort by spot used
+      </label>
+    </div>
+    <div class="overflow-x-auto">
+      <table class="w-full text-xs">
+        <thead class="bg-slate-950/60 text-slate-400">
+          <tr>
+            <th class="text-left px-4 py-2">Subscription</th>
+            <th class="text-right px-4 py-2">On-demand vCPUs used</th>
+            <th class="text-right px-4 py-2 cmp-col hidden">Δ used</th>
+            <th class="text-right px-4 py-2">On-demand quota</th>
+            <th class="text-right px-4 py-2 cmp-col hidden">Δ quota</th>
+            <th class="text-right px-4 py-2">On-demand %</th>
+            <th class="text-right px-4 py-2 border-l border-slate-800">Spot vCPUs used</th>
+            <th class="text-right px-4 py-2 cmp-col hidden">Δ used</th>
+            <th class="text-right px-4 py-2">Spot quota</th>
+            <th class="text-right px-4 py-2 cmp-col hidden">Δ quota</th>
+            <th class="text-right px-4 py-2">Spot %</th>
+            <th class="text-right px-4 py-2 border-l border-slate-800">VM count</th>
+            <th class="text-right px-4 py-2 cmp-col hidden">Δ VMs</th>
+          </tr>
+        </thead>
+        <tbody id="rollups-tbody" class="divide-y divide-slate-800"></tbody>
+        <tfoot class="bg-slate-950/40 font-semibold border-t-2 border-slate-700">
+          <tr id="rollups-totals"></tr>
+        </tfoot>
+      </table>
+    </div>
+  </section>
+
+  <!-- Historical trend across all persisted runs -->
+  <section id="trend-section" class="bg-slate-900/60 border border-slate-800 rounded-xl">
+    <div class="p-4 flex flex-wrap items-center gap-3 border-b border-slate-800">
+      <div class="font-semibold">📈 Historical trend · vCPU usage per day (OD vs Spot vs Total)</div>
+      <span id="trend-status" class="text-[11px] text-slate-500"></span>
+      <div class="ml-auto flex items-center gap-2 text-xs">
+        <input id="trend-filter" type="search" placeholder="filter by sub name/GUID (e.g. CSI)…"
+               class="bg-slate-950 border border-slate-700 rounded px-2 py-1 text-xs text-slate-200 placeholder:text-slate-600 w-64">
+        <button id="trend-clear" type="button"
+                class="text-[11px] text-slate-400 hover:text-slate-200 underline-offset-2 hover:underline">clear</button>
+        <label class="flex items-center gap-1.5 cursor-pointer select-none text-slate-300">
+          <input id="trend-show-quota" type="checkbox" class="accent-sky-500">
+          quota lines
+        </label>
+        <label class="flex items-center gap-1.5 cursor-pointer select-none text-slate-300">
+          <input id="trend-show-used" type="checkbox" class="accent-sky-500" checked>
+          used lines
+        </label>
+        <label class="flex items-center gap-1.5 cursor-pointer select-none text-slate-300">
+          <input id="trend-show-total" type="checkbox" class="accent-sky-500" checked>
+          total
+        </label>
+      </div>
+    </div>
+    <div class="p-4">
+      <div style="position:relative; height:320px;">
+        <canvas id="chart-trend"></canvas>
+      </div>
+    </div>
+  </section>
+
+  <!-- OD vs Spot by VM family (live from Azure Resource Graph) -->
+  <section id="priority-section" class="hidden bg-slate-900/60 border border-fuchsia-700/40 rounded-xl">
+    <div class="p-4 flex flex-wrap items-center gap-3 border-b border-slate-800">
+      <div class="font-semibold text-fuchsia-300">⚡ OD vs Spot by VM family · live VM inventory</div>
+      <span id="priority-totals" class="text-xs text-slate-400"></span>
+      <span class="text-[11px] text-slate-500 ml-auto">Source: Azure Resource Graph · counts running VMs by SKU and priority</span>
+    </div>
+    <div class="overflow-x-auto" style="max-height:480px;">
+      <table class="w-full text-xs">
+        <thead class="bg-slate-950/60 text-slate-400 sticky top-0">
+          <tr>
+            <th class="text-left  px-4 py-2">VM family</th>
+            <th class="text-right px-4 py-2">OD VMs</th>
+            <th class="text-right px-4 py-2">OD cores</th>
+            <th class="text-right px-4 py-2">Spot VMs</th>
+            <th class="text-right px-4 py-2">Spot cores</th>
+            <th class="text-right px-4 py-2">Total cores</th>
+            <th class="text-right px-4 py-2">Spot share</th>
+          </tr>
+        </thead>
+        <tbody id="priority-tbody" class="divide-y divide-slate-800"></tbody>
+        <tfoot class="bg-slate-950/40 font-semibold border-t-2 border-slate-700 text-xs">
+          <tr id="priority-totals-row"></tr>
+        </tfoot>
+      </table>
+    </div>
+  </section>
+
+  <!-- VM family quota groups (hypothetical "what if quota groups" view) -->
+  <section id="qgroups-section" class="hidden bg-slate-900/60 border border-slate-800 rounded-xl">
+    <div class="p-4 flex flex-wrap items-center gap-3 border-b border-slate-800">
+      <div class="font-semibold">🧮 Quota groups · aggregated quota vs usage by VM family group</div>
+      <span id="qgroups-scope" class="text-[11px] text-slate-400">across 0 subs</span>
+      <span class="text-[11px] text-slate-500">Groups follow Azure VM-series families (General Purpose, Compute, Memory, Storage, GPU, HPC, Confidential)</span>
+      <div class="ml-auto flex items-center gap-2 text-xs">
+        <input id="qgroups-filter" type="search" placeholder="filter by sub name/GUID…"
+               class="bg-slate-950 border border-slate-700 rounded px-2 py-1 text-xs text-slate-200 placeholder:text-slate-600 w-56">
+        <button id="qgroups-clear" type="button"
+                class="text-[11px] text-slate-400 hover:text-slate-200 underline-offset-2 hover:underline">clear</button>
+        <label class="flex items-center gap-1.5 cursor-pointer select-none text-slate-300">
+          <input id="qgroups-by-sub" type="checkbox" class="accent-sky-500">
+          per subscription
+        </label>
+        <label class="flex items-center gap-1.5 cursor-pointer select-none text-slate-300">
+          <input id="qgroups-hide-zero" type="checkbox" class="accent-sky-500" checked>
+          hide groups with no allocation
+        </label>
+      </div>
+    </div>
+    <div class="overflow-x-auto" style="max-height:480px;">
+      <table class="w-full text-xs">
+        <thead class="bg-slate-950/60 text-slate-400 sticky top-0">
+          <tr>
+            <th class="text-left px-4 py-2">Quota group</th>
+            <th class="text-left px-4 py-2 qgroups-sub-col hidden">Subscription</th>
+            <th class="text-right px-4 py-2">Families</th>
+            <th class="text-right px-4 py-2">Total quota</th>
+            <th class="text-right px-4 py-2 cmp-col hidden">Δ quota</th>
+            <th class="text-right px-4 py-2">Total used</th>
+            <th class="text-right px-4 py-2 cmp-col hidden">Δ used</th>
+            <th class="text-left px-4 py-2 w-1/4">% used</th>
+            <th class="text-right px-4 py-2">Headroom</th>
+          </tr>
+        </thead>
+        <tbody id="qgroups-tbody" class="divide-y divide-slate-800"></tbody>
+        <tfoot class="bg-slate-950/40 font-semibold border-t-2 border-slate-700 text-xs">
+          <tr id="qgroups-totals"></tr>
+        </tfoot>
+      </table>
+    </div>
+  </section>
+
+  <!-- Quota change summary (only meaningful when comparing) -->
+  <section id="changes-section" class="hidden bg-slate-900/60 border border-sky-700/40 rounded-xl">
+    <div class="p-4 flex flex-wrap items-center gap-3 border-b border-slate-800">
+      <div class="font-semibold text-sky-300">📈 Quota changes <span id="changes-status" class="text-xs text-slate-400 font-normal ml-2"></span></div>
+      <div class="ml-auto flex items-center gap-2 text-xs">
+        <label class="flex items-center gap-1.5 cursor-pointer select-none text-slate-300">
+          <input id="changes-quota-only" type="checkbox" class="accent-sky-500" checked>
+          quota changes only (ignore usage drift)
+        </label>
+        <label class="flex items-center gap-1.5 cursor-pointer select-none text-slate-300">
+          <input id="changes-rollups-first" type="checkbox" class="accent-sky-500" checked>
+          rollups (*, spot, VMs) first
+        </label>
+        <input id="changes-filter" placeholder="filter (sub, family)…" class="bg-slate-950 border border-slate-700 rounded-md px-2 py-1.5 text-xs w-56 focus:border-sky-500 outline-none" />
+      </div>
+    </div>
+    <div class="overflow-x-auto" style="max-height:480px;">
+      <table class="w-full text-xs">
+        <thead class="bg-slate-950/60 text-slate-400 sticky top-0">
+          <tr>
+            <th class="text-left px-4 py-2">Subscription</th>
+            <th class="text-left px-4 py-2">VM family / rollup</th>
+            <th class="text-right px-4 py-2">Quota: prev → now</th>
+            <th class="text-right px-4 py-2">Δ Quota</th>
+            <th class="text-right px-4 py-2 border-l border-slate-800">Usage: prev → now</th>
+            <th class="text-right px-4 py-2">Δ Usage</th>
+          </tr>
+        </thead>
+        <tbody id="changes-tbody" class="divide-y divide-slate-800"></tbody>
+        <tfoot class="bg-slate-950/40 font-semibold border-t-2 border-slate-700 text-xs">
+          <tr id="changes-totals"></tr>
+        </tfoot>
+      </table>
+    </div>
+  </section>
+
+  <!-- Detail table -->
+  <section id="detail-section" class="hidden bg-slate-900/60 border border-slate-800 rounded-xl">
+    <div class="p-4 flex flex-wrap items-center gap-3 border-b border-slate-800">
+      <div class="font-semibold">Detail · per subscription / VM family</div>
+      <input id="filter" placeholder="filter (sub, family, GUID)…" class="ml-auto bg-slate-950 border border-slate-700 rounded-md px-3 py-1.5 text-xs w-64 focus:border-sky-500 outline-none" />
+      <select id="cat-filter" class="bg-slate-950 border border-slate-700 rounded-md px-2 py-1.5 text-xs" title="Family category">
+        <option value="">All categories</option>
+        <option value="compute" selected>Compute (VM only)</option>
+        <option value="disk">Disk / Storage</option>
+        <option value="network">Network</option>
+        <option value="other">Other</option>
+      </select>
+      <select id="pct-filter" class="bg-slate-950 border border-slate-700 rounded-md px-2 py-1.5 text-xs" title="% used filter">
+        <option value="0">All %</option>
+        <option value="50">≥ 50% used</option>
+        <option value="70">≥ 70% used</option>
+        <option value="90">≥ 90% used</option>
+      </select>
+      <div class="flex items-center gap-1 text-xs">
+        <label class="text-slate-400">Quota</label>
+        <input id="qmin" type="number" placeholder="min" class="bg-slate-950 border border-slate-700 rounded-md px-2 py-1.5 text-xs w-20 focus:border-sky-500 outline-none" />
+        <span class="text-slate-500">–</span>
+        <input id="qmax" type="number" placeholder="max" class="bg-slate-950 border border-slate-700 rounded-md px-2 py-1.5 text-xs w-20 focus:border-sky-500 outline-none" />
+      </div>
+      <label class="flex items-center gap-1.5 text-xs text-slate-300 cursor-pointer select-none">
+        <input id="hide-zero" type="checkbox" class="accent-sky-500"> hide usage=0
+      </label>
+      <label class="flex items-center gap-1.5 text-xs text-slate-300 cursor-pointer select-none">
+        <input id="hide-wildcard" type="checkbox" class="accent-sky-500" checked> hide rollups (*, cores)
+      </label>
+      <span id="row-count" class="text-xs text-slate-500"></span>
+    </div>
+    <div class="scrollable" style="max-height:560px;">
+      <table class="w-full text-sm">
+        <thead class="bg-slate-900 sticky top-0 text-slate-400 text-xs uppercase tracking-wider">
+          <tr>
+            <th class="text-left px-4 py-2 cursor-pointer" data-sort="sub_name">Subscription</th>
+            <th class="text-left px-4 py-2 cursor-pointer" data-sort="vm_family">VM Family</th>
+            <th class="text-right px-4 py-2 cursor-pointer" data-sort="current_quota">Quota</th>
+            <th class="text-right px-4 py-2 cursor-pointer cmp-col hidden" data-sort="d_quota">Δ Quota</th>
+            <th class="text-right px-4 py-2 cursor-pointer" data-sort="current_usage">Usage</th>
+            <th class="text-right px-4 py-2 cursor-pointer cmp-col hidden" data-sort="d_usage">Δ Usage</th>
+            <th class="text-left px-4 py-2 cursor-pointer w-1/4" data-sort="pct_used">% Used</th>
+            <th class="text-right px-4 py-2 cursor-pointer" data-sort="elapsed">⏱ s</th>
+          </tr>
+        </thead>
+        <tbody id="tbody"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- Errors / no-quota -->
+  <section id="err-section" class="hidden bg-slate-900/60 border border-amber-700/40 rounded-xl p-4">
+    <details>
+      <summary class="font-semibold text-amber-400">⚠ <span id="err-count">0</span> subs returned no data (likely no allocation in this region / not authorized) — expand</summary>
+      <div class="mt-3 text-xs text-slate-400 scrollable">
+        <table class="w-full">
+          <thead><tr><th class="text-left py-1">Sub</th><th class="text-left py-1">GUID</th><th class="text-left py-1">Reason</th></tr></thead>
+          <tbody id="err-tbody"></tbody>
+        </table>
+      </div>
+    </details>
+  </section>
+
+</main>
+
+<footer class="text-center text-xs text-slate-600 py-6">
+  Data source: <code>lionrock-prod.microsoftlionrock.com/api/selfService/info/ARM/...</code>
+</footer>
+
+<script>
+const $ = (s) => document.querySelector(s);
+const fmt = (n) => n == null ? '—' : Number(n).toLocaleString();
+const pctClass = (p) => p >= 90 ? 'pct-hi' : p >= 70 ? 'pct-mid' : 'pct-lo';
+let SUBS = [];
+let CURRENT_JOB = null;
+let ROWS = [];
+let CHART_FAMS, CHART_SUBS, CHART_SUB_FAM;
+let SORT_KEY = 'pct_used', SORT_DIR = -1;
+let JOB_T0 = 0, JOB_TIMER = null;
+
+// ---- Compare / delta state ----
+let PAST_RUNS = [];          // [{id,region,service,total,started_at,finished_at}, …] sorted newest-first
+let LOADED_JOB_ID = null;    // id of run currently rendered into ROWS
+let BASELINE = null;         // {id, snap, rowsByKey: Map<"sub|fam", {q,u}>, totals}
+const cmpKey = (r) => `${r.sub_guid}|${r.vm_family}`;
+
+// ---- Auth state & modal ----
+let AZ_AVAILABLE = false;
+async function refreshAuth() {
+  try {
+    const r = await fetch('/api/auth/status').then(r => r.json());
+    AZ_AVAILABLE = !!r.az_available;
+    $('#m-az-tag').textContent = AZ_AVAILABLE ? 'detected' : 'not on PATH';
+    $('#m-az-tag').className = AZ_AVAILABLE
+      ? 'text-[10px] uppercase tracking-wider text-emerald-400 ml-1'
+      : 'text-[10px] uppercase tracking-wider text-slate-500 ml-1';
+    if (r.signed_in) {
+      $('#auth-state').textContent = '✓ ' + (r.user || 'signed in');
+      $('#auth-state').className = 'text-emerald-400 text-sm';
+      $('#btn-auth').textContent = 'Sign out';
+      $('#btn-auth').onclick = async () => {
+        await fetch('/api/auth/clear', { method: 'POST' });
+        refreshAuth();
+      };
+      // Now that we have a token, fetch the user's subscriptions.
+      if (!SUBS || SUBS.length === 0) loadSubs();
+    } else {
+      $('#auth-state').textContent = 'not signed in';
+      $('#auth-state').className = 'text-amber-400 text-sm';
+      $('#btn-auth').textContent = 'Sign in';
+      $('#btn-auth').onclick = openAuth;
+    }
+  } catch (e) { $('#auth-state').textContent = 'auth check failed'; }
+}
+
+function openAuth() {
+  $('#auth-modal').classList.remove('hidden');
+  $('#auth-pick').classList.remove('hidden');
+  $('#auth-dev').classList.add('hidden');
+  $('#auth-paste').classList.add('hidden');
+  $('#auth-err').classList.add('hidden');
+}
+function closeAuth() { $('#auth-modal').classList.add('hidden'); }
+function showAuthErr(msg) {
+  $('#auth-err').textContent = msg;
+  $('#auth-err').classList.remove('hidden');
+}
+
+$('#m-az').onclick = async () => {
+  $('#auth-err').classList.add('hidden');
+  $('#m-az').disabled = true;
+  $('#m-az').innerHTML += '<div class="text-xs mt-1 text-slate-400"><span class="spinner inline-block align-middle"></span> Acquiring token via az…</div>';
+  try {
+    const r = await fetch('/api/auth/az', { method: 'POST' });
+    if (!r.ok) throw new Error((await r.json()).detail);
+    closeAuth(); await refreshAuth();
+  } catch (e) {
+    showAuthErr(e.message || String(e));
+  } finally { $('#m-az').disabled = false; }
+};
+
+$('#m-dev').onclick = async () => {
+  $('#auth-err').classList.add('hidden');
+  try {
+    const r = await fetch('/api/auth/devicecode/start', { method: 'POST' });
+    if (!r.ok) throw new Error((await r.json()).detail);
+    const d = await r.json();
+    $('#auth-pick').classList.add('hidden');
+    $('#auth-dev').classList.remove('hidden');
+    $('#dev-code').textContent = d.user_code;
+    $('#dev-url').href = d.verification_uri;
+    $('#dev-url').textContent = d.verification_uri;
+    $('#dev-status').innerHTML = '<span class="spinner"></span> <span>Waiting for sign-in…</span>';
+    pollDevice();
+  } catch (e) { showAuthErr(e.message || String(e)); }
+};
+
+$('#dev-copy').onclick = () => {
+  navigator.clipboard.writeText($('#dev-code').textContent);
+  $('#dev-copy').textContent = '✓';
+  setTimeout(() => $('#dev-copy').textContent = 'Copy', 1500);
+};
+
+async function pollDevice() {
+  for (;;) {
+    await new Promise(r => setTimeout(r, 2500));
+    let s;
+    try { s = await fetch('/api/auth/devicecode/status').then(r => r.json()); } catch { continue; }
+    if (s.status === 'done') {
+      $('#dev-status').innerHTML = '<span class="text-emerald-400">✓ Signed in as ' + (s.user || '') + '</span>';
+      setTimeout(() => { closeAuth(); refreshAuth(); }, 800);
+      return;
+    }
+    if (s.status === 'error') {
+      $('#dev-status').innerHTML = '<span class="text-rose-400">✗ ' + (s.error || 'failed') + '</span>';
+      return;
+    }
+  }
+}
+
+$('#m-paste').onclick = () => {
+  $('#auth-pick').classList.add('hidden');
+  $('#auth-paste').classList.remove('hidden');
+};
+$('#paste-back').onclick = () => {
+  $('#auth-paste').classList.add('hidden');
+  $('#auth-pick').classList.remove('hidden');
+};
+$('#paste-submit').onclick = async () => {
+  $('#paste-err').classList.add('hidden');
+  const tok = $('#paste-input').value.trim();
+  if (!tok) return;
+  try {
+    const r = await fetch('/api/auth/paste', { method: 'POST', headers: {'content-type':'application/json'},
+                                                body: JSON.stringify({ token: tok }) });
+    if (!r.ok) throw new Error((await r.json()).detail);
+    closeAuth(); refreshAuth();
+  } catch (e) {
+    $('#paste-err').textContent = e.message || String(e);
+    $('#paste-err').classList.remove('hidden');
+  }
+};
+
+// ---- Load subs ----
+let SUB_SELECTION = null;   // null = no manual override → use #sub-filter; Set<guid> when picker is used
+
+// Heuristic: legacy USGov-named subs from internal use. Disabled by default
+// in the customer build — most customers don't need this.
+function isLikelyGovSub(name) {
+  if (!name) return false;
+  if (!name.includes('_')) return false;
+  return name === name.toUpperCase();
+}
+
+function activeSubs() {
+  let pool = SUBS;
+  if ($('#skip-gov') && $('#skip-gov').checked) {
+    pool = pool.filter(s => !isLikelyGovSub(s.sub_name));
+  }
+  if (SUB_SELECTION && SUB_SELECTION.size > 0) {
+    return pool.filter(s => SUB_SELECTION.has(s.sub_guid));
+  }
+  const q = ($('#sub-filter').value || '').toLowerCase().trim();
+  if (!q) return pool;
+  const tokens = q.split(',').map(t => t.trim()).filter(Boolean);
+  return pool.filter(s => {
+    const hay = ((s.sub_name || '') + ' ' + (s.sub_guid || '')).toLowerCase();
+    return tokens.every(t => hay.includes(t));
+  });
+}
+
+function refreshSubMatched() {
+  const total = SUBS.length, matched = activeSubs().length;
+  const el = $('#sub-matched');
+  if (SUB_SELECTION && SUB_SELECTION.size > 0) {
+    el.textContent = `· ${matched} picked`;
+    el.classList.remove('hidden');
+  } else if (matched !== total) {
+    el.textContent = `· ${matched} match`;
+    el.classList.remove('hidden');
+  } else {
+    el.classList.add('hidden');
+  }
+  $('#btn-run').disabled = matched === 0;
+}
+
+async function loadSubs() {
+  try {
+    const resp = await fetch('/api/subs');
+    if (resp.status === 401) {
+      // Not signed in yet — that's fine, sign-in panel will handle it.
+      SUBS = [];
+      $('#sub-count').textContent = '—';
+      refreshSubMatched();
+      return;
+    }
+    SUBS = await resp.json();
+    if (!Array.isArray(SUBS)) SUBS = [];
+  } catch (e) {
+    SUBS = [];
+  }
+  SUBS.sort((a, b) => (a.sub_name || '').localeCompare(b.sub_name || ''));
+  $('#sub-count').textContent = SUBS.length.toLocaleString();
+  refreshSubMatched();
+}
+
+$('#sub-filter').addEventListener('input', () => {
+  SUB_SELECTION = null;
+  refreshSubMatched();
+});
+$('#skip-gov').addEventListener('change', refreshSubMatched);
+
+// ---- Sub picker modal ----
+function renderPicker() {
+  const q = ($('#picker-search').value || '').toLowerCase().trim();
+  const list = SUBS.filter(s =>
+    !q || (s.sub_name || '').toLowerCase().includes(q) || (s.sub_guid || '').includes(q));
+  const sel = SUB_SELECTION || new Set();
+  $('#picker-list').innerHTML = list.map(s => `
+    <label class="flex items-center gap-2 px-2 py-1 hover:bg-slate-800/60 rounded cursor-pointer">
+      <input type="checkbox" class="pk-row accent-sky-500" data-guid="${s.sub_guid}" ${sel.has(s.sub_guid) ? 'checked' : ''}>
+      <span class="flex-1 truncate">${escapeHtml(s.sub_name || '(unnamed)')}</span>
+      <span class="text-slate-500">${s.sub_guid}</span>
+    </label>`).join('');
+  $('#picker-list').querySelectorAll('.pk-row').forEach(cb => {
+    cb.addEventListener('change', () => {
+      if (!SUB_SELECTION) SUB_SELECTION = new Set();
+      if (cb.checked) SUB_SELECTION.add(cb.dataset.guid);
+      else SUB_SELECTION.delete(cb.dataset.guid);
+      $('#picker-selected').textContent = SUB_SELECTION.size;
+    });
+  });
+  $('#picker-selected').textContent = (SUB_SELECTION ? SUB_SELECTION.size : 0);
+}
+$('#btn-sub-picker').onclick = () => {
+  // Seed from current text filter if no explicit selection yet
+  if (!SUB_SELECTION) {
+    SUB_SELECTION = new Set(activeSubs().map(s => s.sub_guid));
+  }
+  $('#picker-search').value = '';
+  renderPicker();
+  $('#picker-modal').classList.remove('hidden');
+};
+$('#picker-search').addEventListener('input', renderPicker);
+$('#picker-all').onclick = () => {
+  if (!SUB_SELECTION) SUB_SELECTION = new Set();
+  $('#picker-list').querySelectorAll('.pk-row').forEach(cb => {
+    cb.checked = true;
+    SUB_SELECTION.add(cb.dataset.guid);
+  });
+  $('#picker-selected').textContent = SUB_SELECTION.size;
+};
+$('#picker-none').onclick = () => {
+  SUB_SELECTION = new Set();
+  $('#picker-list').querySelectorAll('.pk-row').forEach(cb => cb.checked = false);
+  $('#picker-selected').textContent = 0;
+};
+$('#picker-apply').onclick = () => {
+  if (SUB_SELECTION && SUB_SELECTION.size === 0) SUB_SELECTION = null;
+  // Clear the text filter so the count badge accurately reflects the picker selection
+  if (SUB_SELECTION) $('#sub-filter').value = '';
+  $('#picker-modal').classList.add('hidden');
+  refreshSubMatched();
+};
+$('#picker-cancel').onclick = () => {
+  $('#picker-modal').classList.add('hidden');
+};
+
+// ---- Run job ----
+$('#btn-run').onclick = async () => {
+  if (CURRENT_JOB) return;
+  const targets = activeSubs();
+  if (targets.length === 0) { alert('No subs match the current filter.'); return; }
+  const body = {
+    region: $('#region').value.trim(),
+    service: $('#service').value,
+    throttle: parseInt($('#throttle').value),
+    subs: targets.map(s => ({ sub_guid: s.sub_guid, sub_name: s.sub_name })),
+  };
+  $('#btn-run').disabled = true;
+  $('#btn-export').classList.add('hidden');
+  $('#kpis').classList.add('hidden');
+  $('#charts').classList.add('hidden');
+  $('#detail-section').classList.add('hidden');
+  $('#err-section').classList.add('hidden');
+  $('#progress-wrap').classList.remove('hidden');
+  $('#progress-log').innerHTML = '';
+  $('#progress-done').textContent = '0';
+  $('#progress-total').textContent = targets.length;
+  $('#progress-bar').style.width = '0%';
+  $('#progress-label').textContent = `Calling Azure ARM — region "${body.region}", service "${body.service}", ${targets.length} subs…`;
+  JOB_T0 = Date.now();
+  if (JOB_TIMER) clearInterval(JOB_TIMER);
+  JOB_TIMER = setInterval(() => {
+    $('#progress-elapsed').textContent = Math.round((Date.now() - JOB_T0) / 1000) + 's';
+  }, 500);
+
+  const job = await fetch('/api/job', { method: 'POST', headers: {'content-type':'application/json'},
+                                         body: JSON.stringify(body) }).then(r => r.json());
+  CURRENT_JOB = job.job_id;
+  streamProgress(job.job_id);
+};
+
+function streamProgress(jobId) {
+  const es = new EventSource(`/api/job/${jobId}/stream`);
+  es.addEventListener('progress', (e) => {
+    const d = JSON.parse(e.data);
+    $('#progress-done').textContent = d.done;
+    const pct = (d.done / d.total) * 100;
+    $('#progress-bar').style.width = pct + '%';
+    const r = d.result;
+    const skuCount = r.data?.SkuUsages?.length || 0;
+    let icon, color, detail;
+    if (r.status === 'OK' && skuCount > 0) {
+      icon = '✓'; color = 'text-emerald-400';
+      detail = `${skuCount} families`;
+    } else if (r.status === 'OK' && skuCount === 0) {
+      icon = '○'; color = 'text-slate-500';
+      detail = `200 OK · no allocation in region`;
+    } else {
+      icon = '✗'; color = 'text-rose-400';
+      const errSnip = (r.error || '').replace(/\s+/g, ' ').slice(0, 140);
+      detail = `HTTP ${r.http} · ${escapeHtml(errSnip) || 'error'}`;
+    }
+    const line = document.createElement('div');
+    line.innerHTML = `<span class="${color}">${icon}</span> <span class="text-slate-400">${escapeHtml(r.sub_name || r.sub_guid)}</span> <span class="text-slate-600">${r.elapsed}s · ${detail}</span>`;
+    $('#progress-log').prepend(line);
+  });
+  es.addEventListener('done', async (e) => {
+    es.close();
+    clearInterval(JOB_TIMER);
+    $('#progress-label').textContent = `✓ Complete — ${Math.round((Date.now()-JOB_T0)/1000)}s wall-clock`;
+    await loadResults(jobId);
+    CURRENT_JOB = null;
+    $('#btn-run').disabled = false;
+    loadPastRunsList();   // refresh the past-runs dropdown so the new run appears
+    scheduleAutoRefresh();
+  });
+  es.onerror = () => { /* keep retrying transparently */ };
+}
+
+// ---- Auto-refresh ----
+let AUTO_TIMER = null;
+let AUTO_NEXT_AT = 0;
+let AUTO_TICK = null;
+
+function clearAutoRefresh() {
+  if (AUTO_TIMER) { clearTimeout(AUTO_TIMER); AUTO_TIMER = null; }
+  if (AUTO_TICK)  { clearInterval(AUTO_TICK); AUTO_TICK = null; }
+  AUTO_NEXT_AT = 0;
+  $('#auto-refresh-next').classList.add('hidden');
+}
+
+function scheduleAutoRefresh() {
+  clearAutoRefresh();
+  if (!$('#auto-refresh').checked) return;
+  const minutes = parseInt($('#auto-refresh-interval').value, 10) || 15;
+  AUTO_NEXT_AT = Date.now() + minutes * 60_000;
+  AUTO_TIMER = setTimeout(() => {
+    if (CURRENT_JOB) {
+      // a job is already running — just reschedule and skip this tick
+      scheduleAutoRefresh();
+      return;
+    }
+    if (!$('#auto-refresh').checked) return;
+    $('#btn-run').click();
+  }, minutes * 60_000);
+  // Live countdown badge
+  const update = () => {
+    const ms = AUTO_NEXT_AT - Date.now();
+    if (ms <= 0) { $('#auto-refresh-next').textContent = 'refreshing…'; return; }
+    const s = Math.round(ms / 1000);
+    const txt = s >= 60 ? `next in ${Math.floor(s/60)}m ${s%60}s` : `next in ${s}s`;
+    $('#auto-refresh-next').textContent = txt;
+  };
+  $('#auto-refresh-next').classList.remove('hidden');
+  update();
+  AUTO_TICK = setInterval(update, 1000);
+}
+
+$('#auto-refresh').addEventListener('change', () => {
+  if ($('#auto-refresh').checked) {
+    // If we have results already, schedule next; otherwise kick off the first run now.
+    if (LOADED_JOB_ID || CURRENT_JOB) {
+      scheduleAutoRefresh();
+    } else {
+      $('#btn-run').click();
+    }
+  } else {
+    clearAutoRefresh();
+  }
+});
+$('#auto-refresh-interval').addEventListener('change', () => {
+  if ($('#auto-refresh').checked) scheduleAutoRefresh();
+});
+
+// ---- Results render ----
+async function loadResults(jobId) {
+  const r = await fetch(`/api/job/${jobId}/results`).then(r => r.json());
+  ROWS = r.rows;
+  LAST_PRIORITY = r.priority_breakdown || null;
+  LOADED_JOB_ID = jobId;
+  await applyBaseline();   // fetches baseline rows (if any) before first render
+  renderKPIs();
+  renderCharts();
+  renderRollups();
+  renderTable();
+  renderErrors();
+  renderQuotaGroups();
+  renderChanges();
+  renderTrend();
+  renderPriority();
+  applyCmpVisibility();
+  $('#kpis').classList.remove('hidden');
+  $('#charts').classList.remove('hidden');
+  $('#rollups-section').classList.remove('hidden');
+  $('#detail-section').classList.remove('hidden');
+  $('#btn-export').classList.remove('hidden');
+}
+
+let LAST_PRIORITY = null;
+
+function renderPriority() {
+  const sec = document.getElementById('priority-section');
+  if (!sec) return;
+  if (!LAST_PRIORITY || !LAST_PRIORITY.rows || LAST_PRIORITY.rows.length === 0) {
+    sec.classList.add('hidden');
+    return;
+  }
+  sec.classList.remove('hidden');
+  // Aggregate rows by family
+  const byFam = new Map();
+  for (const row of LAST_PRIORITY.rows) {
+    const k = row.family || '(unknown)';
+    const cur = byFam.get(k) || { family: k, od_vms: 0, od_cores: 0, spot_vms: 0, spot_cores: 0 };
+    if (row.priority === 'Spot') {
+      cur.spot_vms   += row.vms   || 0;
+      cur.spot_cores += row.cores || 0;
+    } else {
+      cur.od_vms   += row.vms   || 0;
+      cur.od_cores += row.cores || 0;
+    }
+    byFam.set(k, cur);
+  }
+  const rows = [...byFam.values()];
+  rows.sort((a, b) => (b.od_cores + b.spot_cores) - (a.od_cores + a.spot_cores));
+  const tot = LAST_PRIORITY.totals || { od_cores: 0, spot_cores: 0, od_vms: 0, spot_vms: 0 };
+  document.getElementById('priority-totals').textContent =
+    `${(tot.od_vms + tot.spot_vms).toLocaleString()} VMs · ${(tot.od_cores + tot.spot_cores).toLocaleString()} cores total · OD ${tot.od_cores.toLocaleString()} cores / Spot ${tot.spot_cores.toLocaleString()} cores`;
+
+  document.getElementById('priority-tbody').innerHTML = rows.map(r => {
+    const total = r.od_cores + r.spot_cores;
+    const spotPct = total > 0 ? (r.spot_cores / total * 100) : 0;
+    return `<tr class="hover:bg-slate-800/30">
+      <td class="px-4 py-2 font-mono text-slate-200">${esc(r.family)}</td>
+      <td class="px-4 py-2 text-right">${r.od_vms.toLocaleString()}</td>
+      <td class="px-4 py-2 text-right text-sky-300">${r.od_cores.toLocaleString()}</td>
+      <td class="px-4 py-2 text-right">${r.spot_vms.toLocaleString()}</td>
+      <td class="px-4 py-2 text-right text-fuchsia-300">${r.spot_cores.toLocaleString()}</td>
+      <td class="px-4 py-2 text-right font-semibold">${total.toLocaleString()}</td>
+      <td class="px-4 py-2 text-right ${spotPct >= 50 ? 'text-fuchsia-300' : 'text-slate-300'}">${spotPct.toFixed(0)}%</td>
+    </tr>`;
+  }).join('');
+  const totalCores = tot.od_cores + tot.spot_cores;
+  const spotShare = totalCores > 0 ? (tot.spot_cores / totalCores * 100) : 0;
+  document.getElementById('priority-totals-row').innerHTML = `
+    <td class="px-4 py-2">Total · ${rows.length} families</td>
+    <td class="px-4 py-2 text-right">${tot.od_vms.toLocaleString()}</td>
+    <td class="px-4 py-2 text-right text-sky-300">${tot.od_cores.toLocaleString()}</td>
+    <td class="px-4 py-2 text-right">${tot.spot_vms.toLocaleString()}</td>
+    <td class="px-4 py-2 text-right text-fuchsia-300">${tot.spot_cores.toLocaleString()}</td>
+    <td class="px-4 py-2 text-right">${totalCores.toLocaleString()}</td>
+    <td class="px-4 py-2 text-right">${spotShare.toFixed(0)}%</td>`;
+}
+
+function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+function okRows() { return ROWS.filter(r => r.status === 'OK' && r.vm_family); }
+function errRows() { return ROWS.filter(r => r.status !== 'OK' || !r.vm_family); }
+
+// Rollup pseudo-families that already aggregate at the regional or VM level —
+// summing them with per-family rows would double-count.
+const KPI_ROLLUPS = new Set(['*','cores','lowPriorityCores','dedicatedVCpus',
+  'virtualMachines','lowPriorityVMs','availabilitySets',
+  'virtualMachineScaleSets','cloudServices']);
+
+function isComputeCoreRow(r) {
+  return r && r.vm_family && familyCategory(r.vm_family) === 'compute'
+    && !KPI_ROLLUPS.has(r.vm_family);
+}
+
+// Sum a specific rollup family across all OK rows. Used to read the per-sub regional
+// cap (`*`) or the spot pool (`lowPriorityCores`) — these are what Azure actually limits.
+function sumRollup(famName) {
+  let q = 0, u = 0, n = 0;
+  for (const r of okRows()) {
+    if (r.vm_family !== famName) continue;
+    q += r.current_quota || 0; u += r.current_usage || 0; n += 1;
+  }
+  return { q, u, n };
+}
+function sumBaselineRollup(famName, currentSubGuids) {
+  if (!BASELINE) return null;
+  let q = 0, u = 0;
+  for (const [k, v] of BASELINE.rowsByKey) {
+    const pipe = k.indexOf('|');
+    const sg = k.substring(0, pipe);
+    const fam = k.substring(pipe + 1);
+    if (fam !== famName) continue;
+    if (currentSubGuids && !currentSubGuids.has(sg)) continue;
+    q += v.q || 0; u += v.u || 0;
+  }
+  return { q, u };
+}
+
+function renderKPIs() {
+  const okPerFam = okRows().filter(isComputeCoreRow);
+  const subs = new Set(okRows().map(r => r.sub_guid));
+  const fams = new Set(okPerFam.map(r => r.vm_family));
+  // Regional on-demand cap and usage come from the `*` rollup (Azure's actual OD ceiling).
+  // Spot is the separate per-region `lowPriorityCores` pool. Headline numbers combine
+  // both so "total cores" = real total compute footprint they're consuming.
+  const od   = sumRollup('*');
+  const spot = sumRollup('lowPriorityCores');
+  const totUsed  = od.u + spot.u;
+  const totQuota = od.q + spot.q;
+  const pct = totQuota ? ((totUsed / totQuota) * 100).toFixed(1) : 0;
+  $('#k-subs').textContent  = subs.size.toLocaleString();
+  $('#k-fams').textContent  = fams.size.toLocaleString();
+  $('#k-used').textContent  = fmt(totUsed);
+  $('#k-quota').textContent = fmt(totQuota);
+  $('#k-pct').textContent   = pct + '%';
+  $('#k-pct').className = 'text-2xl font-bold mt-1 ' +
+    (pct >= 90 ? 'text-rose-400' : pct >= 70 ? 'text-amber-400' : 'text-emerald-400');
+
+  // Hint subtitles spell out the OD vs Spot split that makes up each headline number.
+  const usedHint  = $('#k-used-hint');
+  const quotaHint = $('#k-quota-hint');
+  if (usedHint)  usedHint.textContent  = `OD ${fmt(od.u)} · Spot ${fmt(spot.u)}`;
+  if (quotaHint) quotaHint.textContent = `OD cap ${fmt(od.q)} · Spot pool ${fmt(spot.q)}`;
+
+  // Baseline deltas — combine OD + Spot rollups, scoped to current run's sub set.
+  const odBase   = BASELINE ? sumBaselineRollup('*', subs)               : null;
+  const spotBase = BASELINE ? sumBaselineRollup('lowPriorityCores', subs) : null;
+  const fb = BASELINE ? scopedBaselineTotals(subs) : null;          // for VM-families count delta only
+  setKpiDelta('#k-subs-d',  fb ? subs.size - fb.subs : null, true);
+  setKpiDelta('#k-fams-d',  fb ? fams.size - fb.fams : null, true);
+  const baseUsed  = (odBase && spotBase) ? (odBase.u + spotBase.u) : null;
+  const baseQuota = (odBase && spotBase) ? (odBase.q + spotBase.q) : null;
+  setKpiDelta('#k-used-d',  baseUsed  != null ? totUsed  - baseUsed  : null);
+  setKpiDelta('#k-quota-d', baseQuota != null ? totQuota - baseQuota : null);
+  if (baseUsed != null) {
+    const basePct = baseQuota ? (baseUsed / baseQuota * 100) : 0;
+    const dp = (pct - basePct).toFixed(1);
+    const cls = dp > 0 ? 'text-amber-400' : dp < 0 ? 'text-emerald-400' : 'text-slate-500';
+    const odΔ   = totUsed - baseUsed;  // not used directly; just keep tags green
+    const spotΔQ = spot.q - spotBase.q;
+    const odΔQ   = od.q - odBase.q;
+    const splitNote = ` · OD quota Δ ${odΔQ >= 0 ? '+' : ''}${fmt(odΔQ)}, Spot quota Δ ${spotΔQ >= 0 ? '+' : ''}${fmt(spotΔQ)}`;
+    $('#k-pct-d').className = 'text-[11px] mt-0.5 ' + cls;
+    $('#k-pct-d').textContent = `${dp > 0 ? '+' : ''}${dp} pp vs baseline (same ${subs.size} sub${subs.size === 1 ? '' : 's'})${splitNote}`;
+  } else {
+    $('#k-pct-d').textContent = '';
+  }
+}
+
+// Sum baseline rows but only across the subset of subs present in the current run,
+// so KPI deltas stay apples-to-apples when the current run is filtered. Also restricts
+// to compute-family rows so cores-quota deltas don't include disk/storage SKUs.
+function scopedBaselineTotals(currentSubGuids) {
+  if (!BASELINE) return null;
+  let used = 0, quota = 0;
+  const subs = new Set(), fams = new Set();
+  for (const [k, v] of BASELINE.rowsByKey) {
+    const pipe = k.indexOf('|');
+    const sg = k.substring(0, pipe);
+    const fam = k.substring(pipe + 1);
+    if (!currentSubGuids.has(sg)) continue;
+    if (!fam || familyCategory(fam) !== 'compute' || KPI_ROLLUPS.has(fam)) continue;
+    used += v.u; quota += v.q;
+    subs.add(sg); fams.add(fam);
+  }
+  return { used, quota, subs: subs.size, fams: fams.size };
+}
+
+function setKpiDelta(sel, d, integerOnly) {
+  const el = $(sel);
+  if (d == null) { el.textContent = ''; return; }
+  const cls = d > 0 ? 'text-emerald-400' : d < 0 ? 'text-rose-400' : 'text-slate-500';
+  el.className = 'text-[11px] mt-0.5 ' + cls;
+  const v = integerOnly ? d : d.toLocaleString();
+  el.textContent = `${d > 0 ? '+' : ''}${v} vs baseline`;
+}
+
+function renderCharts() {
+  const ok = okRows();
+
+  // Top 15 families by aggregate — exclude disk/storage/network noise and rollup aggregates
+  // so the chart shows actual per-VM-family quota distribution.
+  const ROLLUPS = new Set(['*','cores','lowPriorityCores','dedicatedVCpus',
+    'virtualMachines','availabilitySets','virtualMachineScaleSets','cloudServices']);
+  const hideDefaults = $('#hide-defaults') && $('#hide-defaults').checked;
+  const isDefaultRow = (r) => r.current_quota === 0 || r.current_quota === 350;
+  const famAgg = {};
+  for (const r of ok) {
+    if (familyCategory(r.vm_family) !== 'compute') continue;
+    if (ROLLUPS.has(r.vm_family)) continue;
+    if (hideDefaults && isDefaultRow(r)) continue;
+    const f = famAgg[r.vm_family] ||= { used: 0, quota: 0 };
+    f.used += r.current_usage; f.quota += r.current_quota;
+  }
+  const famSort = ($('#fam-sort') && $('#fam-sort').value) || 'quota';
+  const families = Object.entries(famAgg)
+    .map(([k, v]) => ({ name: k, used: v.used, quota: v.quota, pct: v.quota ? v.used / v.quota * 100 : 0 }))
+    .filter(f => f.quota > 0)
+    .sort((a, b) => b[famSort] - a[famSort])
+    .slice(0, 15);
+
+  if (CHART_FAMS) CHART_FAMS.destroy();
+  CHART_FAMS = new Chart($('#chart-families'), {
+    type: 'bar',
+    data: {
+      labels: families.map(f => f.name),
+      datasets: [
+        { label: 'Used',  data: families.map(f => f.used),  backgroundColor: '#38bdf8' },
+        { label: 'Quota', data: families.map(f => f.quota), backgroundColor: '#1e293b' },
+      ]
+    },
+    options: {
+      indexAxis: 'y', responsive: true,
+      scales: { x: { stacked: false, ticks: { color: '#94a3b8' } }, y: { ticks: { color: '#cbd5e1' } } },
+      plugins: { legend: { labels: { color: '#cbd5e1' } } }
+    }
+  });
+
+  // Top subs by max %
+  const subAgg = {};
+  for (const r of ok) {
+    const s = subAgg[r.sub_guid] ||= { name: r.sub_name || r.sub_guid, max: 0, used: 0, quota: 0 };
+    if (r.pct_used > s.max) s.max = r.pct_used;
+    s.used += r.current_usage; s.quota += r.current_quota;
+  }
+  const subs = Object.values(subAgg).sort((a, b) => b.max - a.max).slice(0, 15);
+  if (CHART_SUBS) CHART_SUBS.destroy();
+  CHART_SUBS = new Chart($('#chart-subs'), {
+    type: 'bar',
+    data: {
+      labels: subs.map(s => s.name.length > 30 ? s.name.slice(0, 28) + '…' : s.name),
+      datasets: [{ label: 'Max % used (any family)', data: subs.map(s => s.max),
+                   backgroundColor: subs.map(s => s.max >= 90 ? '#ef4444' : s.max >= 70 ? '#f59e0b' : '#10b981') }]
+    },
+    options: {
+      indexAxis: 'y', responsive: true,
+      scales: { x: { suggestedMax: 100, ticks: { color: '#94a3b8' } }, y: { ticks: { color: '#cbd5e1' } } },
+      plugins: { legend: { display: false } }
+    }
+  });
+
+  // Stacked: per sub, compute quota broken down by family (top N + Other)
+  // — unless a single sub is focused, in which case render that sub's family detail in place.
+  if (FOCUS_SUB) { renderFocusedChart(); return; }
+  $('#focus-bar').classList.add('hidden');
+  const metric = ($('#sub-metric') && $('#sub-metric').value) || 'quota';
+  const topN   = parseInt(($('#sub-topn') && $('#sub-topn').value) || '12');
+  const matrix = {};                    // subKey -> { fam -> value }
+  const subTotals = {};                 // subKey -> total
+  const subNames  = {};                 // subKey -> display name
+  const famTotals = {};                 // fam -> grand total
+  for (const r of ok) {
+    if (familyCategory(r.vm_family) !== 'compute') continue;
+    if (ROLLUPS.has(r.vm_family)) continue;
+    if (hideDefaults && isDefaultRow(r)) continue;
+    const v = metric === 'used' ? r.current_usage : r.current_quota;
+    if (!v) continue;
+    const key = r.sub_guid;
+    matrix[key]    ||= {};
+    matrix[key][r.vm_family] = (matrix[key][r.vm_family] || 0) + v;
+    subTotals[key] = (subTotals[key] || 0) + v;
+    subNames[key]  = r.sub_name || r.sub_guid;
+    famTotals[r.vm_family] = (famTotals[r.vm_family] || 0) + v;
+  }
+  // Sort subs by total desc, drop empties
+  const orderedSubs = Object.keys(subTotals)
+    .filter(k => subTotals[k] > 0)
+    .sort((a, b) => subTotals[b] - subTotals[a]);
+  // Pick top-N families by grand total; collapse the rest into "Other"
+  const orderedFams = Object.keys(famTotals).sort((a, b) => famTotals[b] - famTotals[a]);
+  const keepFams = topN > 0 ? orderedFams.slice(0, topN) : orderedFams;
+  const keepSet  = new Set(keepFams);
+  const hasOther = topN > 0 && orderedFams.length > topN;
+
+  // Order stack segments by their size in the LEADING (largest-total) sub so the
+  // anchor bar reads cleanly big→small. Other subs share the order — that's a
+  // Chart.js limitation of stacked bars, but anchoring on the top bar is the
+  // most useful default.
+  const anchorSub = orderedSubs[0];
+  const anchorRow = (anchorSub && matrix[anchorSub]) || {};
+  const stackOrder = [...keepFams].sort((a, b) => (anchorRow[b] || 0) - (anchorRow[a] || 0));
+  const famAxis  = hasOther ? [...stackOrder, 'Other'] : stackOrder;
+
+  // Distinct dark-theme-friendly palette
+  const palette = [
+    '#38bdf8','#a78bfa','#f472b6','#34d399','#fbbf24','#fb7185','#22d3ee',
+    '#818cf8','#fda4af','#86efac','#fdba74','#5eead4','#c084fc','#facc15',
+    '#60a5fa','#f87171','#4ade80','#e879f9','#67e8f9','#fcd34d','#94a3b8'
+  ];
+  const datasets = famAxis.map((fam, i) => ({
+    label: fam,
+    backgroundColor: fam === 'Other' ? '#475569' : palette[i % palette.length],
+    data: orderedSubs.map(sub => {
+      const row = matrix[sub] || {};
+      if (fam === 'Other') {
+        let acc = 0;
+        for (const f in row) if (!keepSet.has(f)) acc += row[f];
+        return acc;
+      }
+      return row[fam] || 0;
+    })
+  }));
+
+  if (CHART_SUB_FAM) CHART_SUB_FAM.destroy();
+  CHART_SUB_FAM = new Chart($('#chart-sub-fam'), {
+    type: 'bar',
+    data: {
+      labels: orderedSubs.map(k => {
+        const n = subNames[k];
+        return n.length > 38 ? n.slice(0, 36) + '…' : n;
+      }),
+      datasets
+    },
+    options: {
+      indexAxis: 'y', responsive: true,
+      // Give the chart enough vertical room as subs scale
+      maintainAspectRatio: false,
+      onClick: (evt, els) => {
+        const pts = CHART_SUB_FAM.getElementsAtEventForMode(evt, 'y', { intersect: false }, false);
+        if (!pts.length) return;
+        const idx = pts[0].index;
+        const subKey = orderedSubs[idx];
+        if (subKey) focusSub(subKey);
+      },
+      onHover: (e, els, chart) => {
+        // y-axis hit zone — show pointer
+        const pts = chart.getElementsAtEventForMode(e, 'y', { intersect: false }, false);
+        e.native.target.style.cursor = pts.length ? 'pointer' : 'default';
+      },
+      scales: {
+        x: { stacked: true, ticks: { color: '#94a3b8' }, title: { display: true, text: metric === 'used' ? 'vCPUs used' : 'vCPU quota', color: '#94a3b8' } },
+        y: { stacked: true, ticks: { color: '#cbd5e1' } }
+      },
+      plugins: {
+        legend: { labels: { color: '#cbd5e1', boxWidth: 10, font: { size: 10 } }, position: 'bottom', align: 'start' },
+        tooltip: {
+          callbacks: {
+            label: (c) => {
+              const lbl = `${c.dataset.label}: ${c.parsed.x.toLocaleString()}`;
+              if (c.dataset.label !== 'Other') return lbl;
+              // Surface the actual families rolled into "Other" for this sub
+              const subKey = orderedSubs[c.dataIndex];
+              const row = matrix[subKey] || {};
+              const inOther = Object.entries(row)
+                .filter(([f]) => !keepSet.has(f))
+                .sort((a, b) => b[1] - a[1])
+                .slice(0, 8);
+              return [lbl, ...inOther.map(([f, v]) => `  • ${f}: ${v.toLocaleString()}`)];
+            }
+          }
+        }
+      }
+    }
+  });
+  // Scale canvas height with number of subs (24px per sub, min 320)
+  // +120 to account for legend now living below the chart
+  const target = Math.max(320, orderedSubs.length * 24 + 60) + 120;
+  $('#chart-sub-fam').parentElement.style.height = target + 'px';
+}
+
+// ---- Single-sub focus (inline replaces the stacked chart) ----
+let FOCUS_SUB = null;
+
+function clearFocus() {
+  FOCUS_SUB = null;
+  $('#focus-bar').classList.add('hidden');
+  renderCharts();
+}
+window.clearFocus = clearFocus;
+window.focusSub = function(subGuid) {
+  FOCUS_SUB = subGuid;
+  renderCharts();
+};
+
+function renderFocusedChart() {
+  const rows = ROWS.filter(r => r.status === 'OK' && r.vm_family && r.sub_guid === FOCUS_SUB);
+  if (!rows.length) { clearFocus(); return; }
+  const subName = rows[0].sub_name || FOCUS_SUB;
+
+  const ROLLUPS = new Set(['*','cores','lowPriorityCores','dedicatedVCpus',
+    'virtualMachines','availabilitySets','virtualMachineScaleSets','cloudServices']);
+  const hideDefaults = $('#hide-defaults') && $('#hide-defaults').checked;
+  const metric = ($('#sub-metric') && $('#sub-metric').value) || 'quota';
+  const filtered = rows.filter(r => familyCategory(r.vm_family) === 'compute'
+    && !ROLLUPS.has(r.vm_family)
+    && (!hideDefaults || (r.current_quota !== 0 && r.current_quota !== 350)));
+  filtered.sort((a, b) => (metric === 'used' ? b.current_usage - a.current_usage : b.current_quota - a.current_quota));
+
+  const totalQuota = filtered.reduce((s, r) => s + r.current_quota, 0);
+  const totalUsed  = filtered.reduce((s, r) => s + r.current_usage, 0);
+  const pct = totalQuota > 0 ? Math.round(totalUsed / totalQuota * 1000) / 10 : 0;
+
+  $('#focus-bar').classList.remove('hidden');
+  $('#focus-bar-text').innerHTML =
+    `<span class="text-slate-400">Focused:</span> <span class="text-sky-300 font-semibold">${escapeHtml(subName)}</span> ` +
+    `<span class="text-slate-500 font-mono text-[10px]">${FOCUS_SUB}</span> ` +
+    `<span class="text-slate-400 ml-2">· ${filtered.length} families · ${totalQuota.toLocaleString()} vCPU quota · ${totalUsed.toLocaleString()} used (${pct}%)</span>`;
+
+  if (CHART_SUB_FAM) CHART_SUB_FAM.destroy();
+  CHART_SUB_FAM = new Chart($('#chart-sub-fam'), {
+    type: 'bar',
+    data: {
+      labels: filtered.map(r => r.vm_family),
+      datasets: [
+        { label: 'Used',  data: filtered.map(r => r.current_usage), backgroundColor: '#38bdf8' },
+        { label: 'Quota', data: filtered.map(r => r.current_quota), backgroundColor: '#334155' }
+      ]
+    },
+    options: {
+      indexAxis: 'y', responsive: true, maintainAspectRatio: false,
+      scales: {
+        x: { ticks: { color: '#94a3b8' }, title: { display: true, text: 'vCPUs', color: '#94a3b8' } },
+        y: { ticks: { color: '#cbd5e1', font: { size: 11 } } }
+      },
+      plugins: {
+        legend: { labels: { color: '#cbd5e1' }, position: 'bottom' },
+        tooltip: { callbacks: {
+          afterLabel: (c) => {
+            const r = filtered[c.dataIndex];
+            const p = r.current_quota > 0 ? Math.round(r.current_usage / r.current_quota * 1000) / 10 : 0;
+            return `${p}% used`;
+          }
+        }}
+      }
+    }
+  });
+  const target = Math.max(360, filtered.length * 22 + 100);
+  $('#chart-sub-fam').parentElement.style.height = target + 'px';
+}
+
+// Heuristic family classification — Lionrock returns mixed compute/disk/network SKUs
+// even when you query service=compute, so we need to bucket them client-side.
+function familyCategory(name) {
+  if (!name) return 'other';
+  const n = name.toLowerCase();
+  if (/(disk|snapshot|storage|managed)/.test(n)) return 'disk';
+  if (/(vnet|network|publicip|loadbalanc|gateway|nat|firewall|expressroute|dns|appgw|privateendpoint|privatelink|trafficmanager)/.test(n)) return 'network';
+  // Compute heuristics: VM series (standardDSv5Family), cores rollups, batchAccount, etc.
+  if (/family$/i.test(name)) return 'compute';
+  if (/(cores|cpu|vcpu|virtualmachine|availabilityset|scaleset|cloudservice|dedicatedhost)/i.test(name)) return 'compute';
+  if (/^(basic|standard)[a-z0-9]+family$/i.test(name)) return 'compute';
+  return 'other';
+}
+
+// Classify a Lionrock VmFamily string (e.g. "standardDADSv5Family", "standardNCASv3T4Family")
+// into one of Azure's published quota groups. Falls back to 'Other / unclassified'.
+// Reference: Azure VM size series taxonomy (general purpose / compute / memory / storage / GPU / HPC / confidential).
+function vmFamilyGroup(name) {
+  if (!name) return null;
+  // Strip "standard" prefix and "Family" suffix → "DADSv5"
+  let core = name.replace(/^standard/i, '').replace(/family$/i, '');
+  if (!core) return null;
+  const c = core.toUpperCase();
+
+  // Confidential compute (DC*, EC*) — must check before generic D/E
+  if (/^(DC|EC)/.test(c)) return 'Confidential Compute';
+  // HPC: HB, HC, HX (HBv2/v3/v4 etc)
+  if (/^H[BCX]/.test(c)) return 'HPC';
+  // GPU: NC, ND, NV, NG (and NCASv3T4 etc — anything starting with N + CDV)
+  if (/^N[CDVG]/.test(c)) return 'GPU';
+  // Memory optimized: E*, M*, G* (legacy)
+  if (/^E/.test(c))      return 'Memory Optimized';
+  if (/^M/.test(c))      return 'Memory Optimized';
+  if (/^G/.test(c))      return 'Memory Optimized';
+  // Storage optimized: L*
+  if (/^L/.test(c))      return 'Storage Optimized';
+  // Compute optimized: F*, FX
+  if (/^F/.test(c))      return 'Compute Optimized';
+  // General purpose: A, B, D
+  if (/^A/.test(c))      return 'General Purpose';
+  if (/^B/.test(c))      return 'General Purpose';
+  if (/^D/.test(c))      return 'General Purpose';
+  // Burstable / unclassified standard families
+  return 'Other / unclassified';
+}
+
+function renderTable() {
+  const ok = okRows().slice();
+  const q = $('#filter').value.toLowerCase().trim();
+  const minPct = parseInt($('#pct-filter').value) || 0;
+  const qMin = $('#qmin').value === '' ? null : Number($('#qmin').value);
+  const qMax = $('#qmax').value === '' ? null : Number($('#qmax').value);
+  const hideZero = $('#hide-zero').checked;
+  const hideWild = $('#hide-wildcard').checked;
+  const cat = $('#cat-filter').value;
+
+  // Rollup families to hide when "hide-wildcard" is on — these aggregate across
+  // every per-family quota so they're double-counted noise when scanning a sub.
+  const rollupFamilies = new Set([
+    '*', 'cores', 'lowPriorityCores', 'dedicatedVCpus',
+    'virtualMachines', 'availabilitySets', 'virtualMachineScaleSets', 'cloudServices'
+  ]);
+
+  let rows = ok.filter(r => r.pct_used >= minPct);
+  if (cat)          rows = rows.filter(r => familyCategory(r.vm_family) === cat);
+  if (qMin != null) rows = rows.filter(r => r.current_quota >= qMin);
+  if (qMax != null) rows = rows.filter(r => r.current_quota <= qMax);
+  if (hideZero)     rows = rows.filter(r => r.current_usage > 0);
+  if (hideWild)     rows = rows.filter(r => !rollupFamilies.has(r.vm_family));
+  if (q) rows = rows.filter(r =>
+    (r.sub_name || '').toLowerCase().includes(q) ||
+    (r.sub_guid || '').includes(q) ||
+    (r.vm_family || '').toLowerCase().includes(q));
+
+  // Decorate each row with deltas vs baseline (null if no baseline or no prior datapoint)
+  if (BASELINE) {
+    for (const r of rows) {
+      const prev = BASELINE.rowsByKey.get(cmpKey(r));
+      r.d_quota = prev ? r.current_quota - prev.q : null;
+      r.d_usage = prev ? r.current_usage - prev.u : null;
+    }
+  } else {
+    for (const r of rows) { r.d_quota = null; r.d_usage = null; }
+  }
+
+  rows.sort((a, b) => {
+    const x = a[SORT_KEY], y = b[SORT_KEY];
+    if (x == null) return 1; if (y == null) return -1;
+    return (x > y ? 1 : x < y ? -1 : 0) * SORT_DIR;
+  });
+  $('#row-count').textContent = `${rows.length.toLocaleString()} rows`;
+  const tb = $('#tbody');
+  tb.innerHTML = rows.slice(0, 2000).map(r => `
+    <tr class="border-t border-slate-800/60">
+      <td class="px-4 py-1.5">
+        <div class="font-medium">${escapeHtml(r.sub_name || '(unnamed)')}</div>
+        <div class="guid">${r.sub_guid}</div>
+      </td>
+      <td class="px-4 py-1.5 font-mono text-xs">${escapeHtml(r.vm_family)}</td>
+      <td class="px-4 py-1.5 text-right">${fmt(r.current_quota)}</td>
+      ${deltaCell(r.d_quota)}
+      <td class="px-4 py-1.5 text-right">${fmt(r.current_usage)}</td>
+      ${deltaCell(r.d_usage)}
+      <td class="px-4 py-1.5">
+        <div class="flex items-center gap-2">
+          <div class="bar-track flex-1"><div class="bar-fill ${pctClass(r.pct_used)}" style="width:${Math.min(100, r.pct_used)}%"></div></div>
+          <span class="text-xs w-12 text-right">${r.pct_used}%</span>
+        </div>
+      </td>
+      <td class="px-4 py-1.5 text-right text-slate-500 text-xs">${r.elapsed}</td>
+    </tr>`).join('');
+  if (rows.length > 2000) {
+    tb.innerHTML += `<tr><td colspan="8" class="text-center text-slate-500 py-3">… ${rows.length - 2000} more rows hidden — refine filters</td></tr>`;
+  }
+  applyCmpVisibility();
+}
+
+function deltaCell(d) {
+  if (d == null) return `<td class="px-4 py-1.5 text-right text-slate-600 cmp-col">—</td>`;
+  if (d === 0)   return `<td class="px-4 py-1.5 text-right text-slate-500 cmp-col">0</td>`;
+  const cls = d > 0 ? 'text-emerald-400' : 'text-rose-400';
+  const sign = d > 0 ? '+' : '';
+  return `<td class="px-4 py-1.5 text-right tabular-nums cmp-col ${cls}">${sign}${d.toLocaleString()}</td>`;
+}
+
+function applyCmpVisibility() {
+  document.querySelectorAll('.cmp-col').forEach(el => el.classList.toggle('hidden', !BASELINE));
+}
+
+function renderErrors() {
+  const errs = errRows();
+  if (!errs.length) { $('#err-section').classList.add('hidden'); return; }
+  $('#err-section').classList.remove('hidden');
+  $('#err-count').textContent = errs.length;
+  $('#err-tbody').innerHTML = errs.slice(0, 500).map(r => `
+    <tr><td class="py-0.5 pr-2">${escapeHtml(r.sub_name || '')}</td>
+        <td class="py-0.5 pr-2 font-mono">${r.sub_guid}</td>
+        <td class="py-0.5 text-amber-400">${escapeHtml(r.error || r.status)}</td></tr>`).join('');
+}
+
+function escapeHtml(s) { return (s ?? '').toString().replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+// table sort/filter listeners
+document.querySelectorAll('th[data-sort]').forEach(th => {
+  th.onclick = () => {
+    const k = th.dataset.sort;
+    if (SORT_KEY === k) SORT_DIR = -SORT_DIR; else { SORT_KEY = k; SORT_DIR = -1; }
+    renderTable();
+  };
+});
+$('#filter').addEventListener('input', renderTable);
+$('#pct-filter').addEventListener('change', renderTable);
+$('#cat-filter').addEventListener('change', renderTable);
+$('#qmin').addEventListener('input', renderTable);
+$('#qmax').addEventListener('input', renderTable);
+$('#hide-zero').addEventListener('change', renderTable);
+$('#hide-wildcard').addEventListener('change', renderTable);
+$('#fam-sort').addEventListener('change', renderCharts);
+$('#sub-metric').addEventListener('change', renderCharts);
+$('#sub-topn').addEventListener('change', renderCharts);
+$('#hide-defaults').addEventListener('change', renderCharts);
+$('#rollup-hide-zero').addEventListener('change', renderRollups);
+$('#rollup-sort-spot').addEventListener('change', renderRollups);
+
+// ---- Regional rollups (on-demand `*` + spot `lowPriorityCores` per sub) ----
+function buildRollups(rowsArr) {
+  const bySub = new Map();
+  for (const r of rowsArr) {
+    if (r.status !== 'OK' || !r.vm_family) continue;
+    if (!['*', 'lowPriorityCores', 'virtualMachines'].includes(r.vm_family)) continue;
+    if (!bySub.has(r.sub_guid)) {
+      bySub.set(r.sub_guid, { name: r.sub_name, guid: r.sub_guid,
+        odUsed: 0, odQuota: 0, spotUsed: 0, spotQuota: 0, vmCount: 0, vmCountQuota: 0 });
+    }
+    const s = bySub.get(r.sub_guid);
+    if (r.vm_family === '*')                     { s.odUsed = r.current_usage; s.odQuota = r.current_quota; }
+    else if (r.vm_family === 'lowPriorityCores') { s.spotUsed = r.current_usage; s.spotQuota = r.current_quota; }
+    else if (r.vm_family === 'virtualMachines')  { s.vmCount = r.current_usage; s.vmCountQuota = r.current_quota; }
+  }
+  return bySub;
+}
+
+function renderRollups() {
+  const tbody = $('#rollups-tbody');
+  const totalsRow = $('#rollups-totals');
+  if (!tbody) return;
+
+  const bySub = buildRollups(ROWS);
+  const baseBySub = BASELINE ? BASELINE.rollupsBySub : null;
+
+  let rows = [...bySub.values()];
+  if ($('#rollup-hide-zero').checked) {
+    rows = rows.filter(s => s.odUsed > 0 || s.spotUsed > 0 || s.vmCount > 0);
+  }
+  if ($('#rollup-sort-spot').checked) {
+    rows.sort((a, b) => b.spotUsed - a.spotUsed);
+  } else {
+    rows.sort((a, b) => b.odUsed - a.odUsed);
+  }
+
+  const pct = (u, q) => q > 0 ? `${(100 * u / q).toFixed(1)}%` : '—';
+  const pctClass = (u, q) => {
+    if (q === 0) return 'text-slate-500';
+    const p = u / q;
+    if (p >= 0.8) return 'text-red-400';
+    if (p >= 0.5) return 'text-amber-400';
+    if (p > 0)    return 'text-emerald-400';
+    return 'text-slate-500';
+  };
+  const dCell = (cur, basePresent, base) => {
+    if (!basePresent || base == null) return `<td class="px-4 py-1.5 text-right text-slate-600 cmp-col">—</td>`;
+    const d = cur - base;
+    if (d === 0) return `<td class="px-4 py-1.5 text-right text-slate-500 cmp-col">0</td>`;
+    const cls = d > 0 ? 'text-emerald-400' : 'text-rose-400';
+    return `<td class="px-4 py-1.5 text-right tabular-nums cmp-col ${cls}">${d > 0 ? '+' : ''}${d.toLocaleString()}</td>`;
+  };
+
+  tbody.innerHTML = rows.map(s => {
+    const b = baseBySub ? baseBySub.get(s.guid) : null;
+    const has = !!baseBySub;
+    return `
+    <tr class="hover:bg-slate-800/40">
+      <td class="px-4 py-1.5 truncate max-w-[280px]" title="${s.guid}">${s.name || s.guid}</td>
+      <td class="px-4 py-1.5 text-right tabular-nums">${s.odUsed.toLocaleString()}</td>
+      ${dCell(s.odUsed, has, b ? b.odUsed : 0)}
+      <td class="px-4 py-1.5 text-right tabular-nums text-slate-400">${s.odQuota.toLocaleString()}</td>
+      ${dCell(s.odQuota, has, b ? b.odQuota : 0)}
+      <td class="px-4 py-1.5 text-right tabular-nums ${pctClass(s.odUsed, s.odQuota)}">${pct(s.odUsed, s.odQuota)}</td>
+      <td class="px-4 py-1.5 text-right tabular-nums border-l border-slate-800">${s.spotUsed.toLocaleString()}</td>
+      ${dCell(s.spotUsed, has, b ? b.spotUsed : 0)}
+      <td class="px-4 py-1.5 text-right tabular-nums text-slate-400">${s.spotQuota.toLocaleString()}</td>
+      ${dCell(s.spotQuota, has, b ? b.spotQuota : 0)}
+      <td class="px-4 py-1.5 text-right tabular-nums ${pctClass(s.spotUsed, s.spotQuota)}">${pct(s.spotUsed, s.spotQuota)}</td>
+      <td class="px-4 py-1.5 text-right tabular-nums border-l border-slate-800 text-slate-300">${s.vmCount.toLocaleString()}<span class="text-slate-600"> / ${s.vmCountQuota.toLocaleString()}</span></td>
+      ${dCell(s.vmCount, has, b ? b.vmCount : 0)}
+    </tr>`;
+  }).join('');
+
+  const tot = rows.reduce((a, s) => ({
+    odUsed: a.odUsed + s.odUsed, odQuota: a.odQuota + s.odQuota,
+    spotUsed: a.spotUsed + s.spotUsed, spotQuota: a.spotQuota + s.spotQuota,
+    vmCount: a.vmCount + s.vmCount, vmCountQuota: a.vmCountQuota + s.vmCountQuota,
+  }), { odUsed:0, odQuota:0, spotUsed:0, spotQuota:0, vmCount:0, vmCountQuota:0 });
+
+  // Aggregate baseline totals across the same set of subs we're showing
+  let bt = null;
+  if (baseBySub) {
+    bt = { odUsed:0, odQuota:0, spotUsed:0, spotQuota:0, vmCount:0 };
+    for (const s of rows) {
+      const b = baseBySub.get(s.guid);
+      if (!b) continue;
+      bt.odUsed   += b.odUsed;   bt.odQuota   += b.odQuota;
+      bt.spotUsed += b.spotUsed; bt.spotQuota += b.spotQuota;
+      bt.vmCount  += b.vmCount;
+    }
+  }
+
+  totalsRow.innerHTML = `
+    <td class="px-4 py-2">TOTAL · ${rows.length} subs</td>
+    <td class="px-4 py-2 text-right tabular-nums">${tot.odUsed.toLocaleString()}</td>
+    ${dCell(tot.odUsed, !!bt, bt ? bt.odUsed : 0)}
+    <td class="px-4 py-2 text-right tabular-nums text-slate-400">${tot.odQuota.toLocaleString()}</td>
+    ${dCell(tot.odQuota, !!bt, bt ? bt.odQuota : 0)}
+    <td class="px-4 py-2 text-right tabular-nums">${pct(tot.odUsed, tot.odQuota)}</td>
+    <td class="px-4 py-2 text-right tabular-nums border-l border-slate-800">${tot.spotUsed.toLocaleString()}</td>
+    ${dCell(tot.spotUsed, !!bt, bt ? bt.spotUsed : 0)}
+    <td class="px-4 py-2 text-right tabular-nums text-slate-400">${tot.spotQuota.toLocaleString()}</td>
+    ${dCell(tot.spotQuota, !!bt, bt ? bt.spotQuota : 0)}
+    <td class="px-4 py-2 text-right tabular-nums">${pct(tot.spotUsed, tot.spotQuota)}</td>
+    <td class="px-4 py-2 text-right tabular-nums border-l border-slate-800 text-slate-300">${tot.vmCount.toLocaleString()}<span class="text-slate-600"> / ${tot.vmCountQuota.toLocaleString()}</span></td>
+    ${dCell(tot.vmCount, !!bt, bt ? bt.vmCount : 0)}
+  `;
+  applyCmpVisibility();
+}
+
+// ---- Historical trend chart ----
+// Pulls /api/jobs/trend (which scans every persisted job file), builds a multi-line
+// time series of OD vs Spot quota and usage. Filterable by sub-name substring.
+let CHART_TREND = null;
+let TREND_INFLIGHT = null;
+async function renderTrend() {
+  const canvas = $('#chart-trend');
+  if (!canvas) return;
+  const subq = ($('#trend-filter')?.value || '').trim();
+  const showQ = $('#trend-show-quota')?.checked ?? false;
+  const showU = $('#trend-show-used')?.checked ?? true;
+  const showT = $('#trend-show-total')?.checked ?? true;
+  const status = $('#trend-status');
+  if (status) status.textContent = subq ? `loading… (filter: "${subq}")` : 'loading…';
+
+  // Race-protect: cancel previous fetch in flight
+  const myReq = (TREND_INFLIGHT = Symbol('trend'));
+  let data;
+  try {
+    const url = `/api/jobs/trend${subq ? `?subq=${encodeURIComponent(subq)}` : ''}`;
+    data = await fetch(url).then(r => r.json());
+  } catch (e) {
+    if (status) status.textContent = `error: ${e.message}`;
+    return;
+  }
+  if (myReq !== TREND_INFLIGHT) return;       // a newer request is in flight
+
+  // Group runs by date (yyyy-mm-dd) and take the LAST run of each day so the chart
+  // shows one data point per calendar day — that's "per day we have data on".
+  const allPts = (data.points || []).slice().sort((a, b) => a.finished_at - b.finished_at);
+  const byDay = new Map();   // yyyy-mm-dd -> point
+  for (const p of allPts) {
+    const day = (p.finished_at_iso || '').slice(0, 10);
+    if (!day) continue;
+    byDay.set(day, p);    // later run on the same day overwrites, so we end up with last-of-day
+  }
+  const days = [...byDay.keys()].sort();
+  const pts  = days.map(d => byDay.get(d));
+  const labels = days;
+  const odQ   = pts.map(p => p.od_quota);
+  const odU   = pts.map(p => p.od_used);
+  const spQ   = pts.map(p => p.spot_quota);
+  const spU   = pts.map(p => p.spot_used);
+  const totU  = pts.map(p => (p.od_used || 0) + (p.spot_used || 0));
+  const totQ  = pts.map(p => (p.od_quota || 0) + (p.spot_quota || 0));
+  const matchedMax = pts.reduce((a, p) => Math.max(a, p.subs_matched || 0), 0);
+
+  const datasets = [];
+  if (showU) {
+    datasets.push({ label: 'OD used',   data: odU, borderColor: '#38bdf8', backgroundColor: '#38bdf822', tension: 0.25, borderWidth: 2, pointRadius: 3 });
+    datasets.push({ label: 'Spot used', data: spU, borderColor: '#f472b6', backgroundColor: '#f472b622', tension: 0.25, borderWidth: 2, pointRadius: 3, borderDash: [4, 4] });
+  }
+  if (showT) {
+    datasets.push({ label: 'Total used (OD + Spot)', data: totU, borderColor: '#fbbf24', backgroundColor: '#fbbf2422', tension: 0.25, borderWidth: 3, pointRadius: 4 });
+  }
+  if (showQ) {
+    datasets.push({ label: 'OD quota (regional cap)',    data: odQ, borderColor: '#34d399', backgroundColor: '#34d39922', tension: 0.2, borderWidth: 1.5, pointRadius: 2, borderDash: [2, 2] });
+    datasets.push({ label: 'Spot quota (regional pool)', data: spQ, borderColor: '#a78bfa', backgroundColor: '#a78bfa22', tension: 0.2, borderWidth: 1.5, pointRadius: 2, borderDash: [2, 2] });
+    datasets.push({ label: 'Total quota',                data: totQ, borderColor: '#94a3b8', backgroundColor: '#94a3b822', tension: 0.2, borderWidth: 1.5, pointRadius: 2, borderDash: [2, 2] });
+  }
+
+  if (CHART_TREND) { CHART_TREND.destroy(); CHART_TREND = null; }
+  CHART_TREND = new Chart(canvas, {
+    type: 'line',
+    data: { labels, datasets },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { labels: { color: '#cbd5e1', font: { size: 11 } } },
+        tooltip: {
+          callbacks: {
+            label: (ctx) => `${ctx.dataset.label}: ${ctx.parsed.y.toLocaleString()} cores`,
+            afterBody: (items) => {
+              const i = items[0]?.dataIndex; if (i == null) return '';
+              const p = pts[i]; if (!p) return '';
+              const odPct = p.od_quota ? (p.od_used / p.od_quota * 100).toFixed(1) : '0.0';
+              const spPct = p.spot_quota ? (p.spot_used / p.spot_quota * 100).toFixed(1) : '0.0';
+              const tot = (p.od_used || 0) + (p.spot_used || 0);
+              return [`run @ ${p.finished_at_iso.replace('T', ' ').slice(0, 16)} (last of day)`,
+                      `subs matched: ${p.subs_matched}/${p.subs_total}`,
+                      `OD utilization: ${odPct}%   Spot utilization: ${spPct}%`,
+                      `total cores: ${tot.toLocaleString()}`,
+                      `region: ${p.region || '-'}`];
+            },
+          },
+        },
+      },
+      scales: {
+        x: { ticks: { color: '#94a3b8', font: { size: 10 }, maxRotation: 45, minRotation: 0 }, grid: { color: '#1e293b' } },
+        y: { ticks: { color: '#94a3b8', font: { size: 10 }, callback: v => v.toLocaleString() }, grid: { color: '#1e293b' }, beginAtZero: true },
+      },
+    },
+  });
+
+  if (status) {
+    if (!pts.length) {
+      status.textContent = 'no historical runs yet';
+    } else {
+      const first = pts[0], last = pts[pts.length - 1];
+      const firstTot = (first.od_used || 0) + (first.spot_used || 0);
+      const lastTot  = (last.od_used  || 0) + (last.spot_used  || 0);
+      const odΔ = last.od_used - first.od_used;
+      const spΔ = last.spot_used - first.spot_used;
+      const totΔ = lastTot - firstTot;
+      const sgn = (n) => (n >= 0 ? '+' : '') + n.toLocaleString();
+      const span = `${days[0]} → ${days[days.length - 1]}`;
+      status.textContent = `${days.length} days · ${allPts.length} runs · ${span}${subq ? ` · "${subq}" matched ${matchedMax} subs` : ''} · OD used Δ ${sgn(odΔ)}, Spot used Δ ${sgn(spΔ)}, Total Δ ${sgn(totΔ)} over span`;
+    }
+  }
+}
+
+// ---- VM family quota groups (hypothetical "what if quota groups were used") ----
+// Aggregates per-family quota & usage into Azure's published series groups, optionally
+// further split per subscription. Skips rollup wildcards (`*`, `lowPriorityCores`, etc.)
+// because those already aggregate across all families and would double-count.
+function renderQuotaGroups() {
+  const sec = $('#qgroups-section');
+  const tbody = $('#qgroups-tbody');
+  const totalsRow = $('#qgroups-totals');
+  if (!sec || !tbody) return;
+
+  const ok = okRows();
+  if (!ok.length) { sec.classList.add('hidden'); return; }
+  sec.classList.remove('hidden');
+
+  const bySub  = $('#qgroups-by-sub').checked;
+  const hideZero = $('#qgroups-hide-zero').checked;
+  const subQ = ($('#qgroups-filter')?.value || '').trim().toLowerCase();
+  const ROLLUP_FAMS = new Set(['*', 'lowPriorityCores', 'virtualMachines',
+                               'cores', 'lowPriorityVMs', 'dedicatedVCpus',
+                               'availabilitySets', 'virtualMachineScaleSets', 'cloudServices']);
+
+  // Toggle the per-sub column visibility
+  document.querySelectorAll('.qgroups-sub-col').forEach(el => el.classList.toggle('hidden', !bySub));
+
+  // Apply optional sub-name/GUID filter to the input rows; track scoped sub count
+  const scoped = subQ
+    ? ok.filter(r => (r.sub_name || '').toLowerCase().includes(subQ) ||
+                     (r.sub_guid || '').toLowerCase().includes(subQ))
+    : ok;
+  const subSet = new Set();
+  for (const r of scoped) if (r.sub_guid) subSet.add(r.sub_guid);
+  const allSubSet = new Set();
+  for (const r of ok) if (r.sub_guid) allSubSet.add(r.sub_guid);
+  const scopeEl = $('#qgroups-scope');
+  if (scopeEl) {
+    scopeEl.textContent = subQ
+      ? `across ${subSet.size} of ${allSubSet.size} subs (filtered: "${subQ}")`
+      : `across all ${allSubSet.size} subs in run`;
+    scopeEl.classList.toggle('text-amber-300', !!subQ);
+    scopeEl.classList.toggle('text-slate-400', !subQ);
+  }
+
+  const agg = new Map();    // key → { group, sub_name, sub_guid, fams:Set, q, u, dQ, dU }
+  const keyOf = (group, sub_guid, sub_name) => bySub ? `${group}\u0001${sub_guid}` : group;
+
+  for (const r of scoped) {
+    if (familyCategory(r.vm_family) !== 'compute') continue;
+    if (ROLLUP_FAMS.has(r.vm_family)) continue;
+    const group = vmFamilyGroup(r.vm_family);
+    if (!group) continue;
+    const k = keyOf(group, r.sub_guid, r.sub_name);
+    let row = agg.get(k);
+    if (!row) {
+      row = { group, sub_name: r.sub_name, sub_guid: r.sub_guid,
+              fams: new Set(), q: 0, u: 0, dQ: 0, dU: 0, hasBaseline: false };
+      agg.set(k, row);
+    }
+    row.fams.add(r.vm_family);
+    row.q += r.current_quota || 0;
+    row.u += r.current_usage || 0;
+    if (BASELINE) {
+      const prev = BASELINE.rowsByKey.get(`${r.sub_guid}|${r.vm_family}`);
+      if (prev) {
+        row.dQ += (r.current_quota - prev.q);
+        row.dU += (r.current_usage - prev.u);
+        row.hasBaseline = true;
+      }
+    }
+  }
+
+  // Compute totals from the FULL aggregated set (independent of hideZero) so the
+  // bottom row honestly reflects every quota group in the scoped subs, even ones
+  // we hide from view because they're zero on both sides.
+  const allRows = [...agg.values()];
+  let rows = allRows.slice();
+  if (hideZero) rows = rows.filter(r => r.q > 0 || r.u > 0);
+  rows.sort((a, b) => b.q - a.q);
+
+  // Color palette for groups (consistent across renders)
+  const groupColors = {
+    'General Purpose':    'text-sky-300',
+    'Compute Optimized':  'text-emerald-300',
+    'Memory Optimized':   'text-amber-300',
+    'Storage Optimized':  'text-violet-300',
+    'GPU':                'text-rose-300',
+    'HPC':                'text-orange-300',
+    'Confidential Compute':'text-cyan-300',
+    'Other / unclassified':'text-slate-400',
+  };
+
+  const dColor = (d) => d > 0 ? 'delta-pos' : d < 0 ? 'delta-neg' : 'delta-zero';
+  const sgn = (d) => (d > 0 ? '+' : '') + (d || 0).toLocaleString();
+  const pctClassRow = (p) => p >= 90 ? 'pct-hi' : p >= 70 ? 'pct-mid' : 'pct-lo';
+
+  tbody.innerHTML = rows.map(r => {
+    const p = r.q > 0 ? (r.u / r.q * 100) : 0;
+    const headroom = Math.max(0, r.q - r.u);
+    return `
+    <tr>
+      <td class="px-4 py-1.5 font-semibold ${groupColors[r.group] || 'text-slate-300'}">${escapeHtml(r.group)}</td>
+      ${bySub ? `<td class="px-4 py-1.5 qgroups-sub-col">
+        <div>${escapeHtml(r.sub_name || '(unnamed)')}</div>
+        <div class="guid">${r.sub_guid}</div>
+      </td>` : ''}
+      <td class="px-4 py-1.5 text-right tabular-nums text-slate-400">${r.fams.size}</td>
+      <td class="px-4 py-1.5 text-right tabular-nums text-emerald-400">${r.q.toLocaleString()}</td>
+      <td class="px-4 py-1.5 text-right tabular-nums cmp-col ${dColor(r.dQ)}">${r.hasBaseline ? sgn(r.dQ) : '—'}</td>
+      <td class="px-4 py-1.5 text-right tabular-nums text-sky-400">${r.u.toLocaleString()}</td>
+      <td class="px-4 py-1.5 text-right tabular-nums cmp-col ${dColor(r.dU)}">${r.hasBaseline ? sgn(r.dU) : '—'}</td>
+      <td class="px-4 py-1.5">
+        <div class="flex items-center gap-2">
+          <div class="bar-track flex-1"><div class="bar-fill ${pctClassRow(p)}" style="width:${Math.min(100, p)}%"></div></div>
+          <span class="text-xs w-12 text-right">${p.toFixed(1)}%</span>
+        </div>
+      </td>
+      <td class="px-4 py-1.5 text-right tabular-nums text-slate-300">${headroom.toLocaleString()}</td>
+    </tr>`;
+  }).join('');
+
+  // Aggregate totals across ALL groups (not just visible after hideZero) so the
+  // total is always the honest sum for the scoped subs.
+  const tot = allRows.reduce((a, r) => ({
+    q: a.q + r.q, u: a.u + r.u, dQ: a.dQ + r.dQ, dU: a.dU + r.dU,
+    fams: a.fams + r.fams.size,
+  }), { q: 0, u: 0, dQ: 0, dU: 0, fams: 0 });
+  const totPct = tot.q > 0 ? (tot.u / tot.q * 100) : 0;
+  const totHead = Math.max(0, tot.q - tot.u);
+  const groupLabel = (rows.length === allRows.length)
+    ? `${allRows.length} group${allRows.length === 1 ? '' : 's'}`
+    : `${rows.length} of ${allRows.length} groups shown`;
+  const subLabel = subQ
+    ? ` · ${subSet.size} of ${allSubSet.size} subs`
+    : ` · all ${allSubSet.size} subs`;
+
+  totalsRow.innerHTML = `
+    <td class="px-4 py-2">TOTAL · ${groupLabel}${subLabel}</td>
+    ${bySub ? '<td class="px-4 py-2 qgroups-sub-col"></td>' : ''}
+    <td class="px-4 py-2 text-right tabular-nums text-slate-400">${tot.fams.toLocaleString()}</td>
+    <td class="px-4 py-2 text-right tabular-nums text-emerald-400">${tot.q.toLocaleString()}</td>
+    <td class="px-4 py-2 text-right tabular-nums cmp-col ${dColor(tot.dQ)}">${BASELINE ? sgn(tot.dQ) : '—'}</td>
+    <td class="px-4 py-2 text-right tabular-nums text-sky-400">${tot.u.toLocaleString()}</td>
+    <td class="px-4 py-2 text-right tabular-nums cmp-col ${dColor(tot.dU)}">${BASELINE ? sgn(tot.dU) : '—'}</td>
+    <td class="px-4 py-2 text-right tabular-nums">${totPct.toFixed(1)}%</td>
+    <td class="px-4 py-2 text-right tabular-nums text-slate-300">${totHead.toLocaleString()}</td>
+  `;
+  applyCmpVisibility();
+}
+
+['#qgroups-by-sub', '#qgroups-hide-zero'].forEach(s =>
+  document.querySelector(s)?.addEventListener('change', renderQuotaGroups));
+$('#qgroups-filter')?.addEventListener('input', renderQuotaGroups);
+$('#qgroups-clear')?.addEventListener('click', () => {
+  const el = $('#qgroups-filter');
+  if (el) { el.value = ''; renderQuotaGroups(); }
+});
+
+// Trend chart listeners — debounce filter input so we don't spam /api/jobs/trend on each keystroke
+let TREND_DEBOUNCE = null;
+$('#trend-filter')?.addEventListener('input', () => {
+  clearTimeout(TREND_DEBOUNCE);
+  TREND_DEBOUNCE = setTimeout(renderTrend, 350);
+});
+$('#trend-clear')?.addEventListener('click', () => {
+  const el = $('#trend-filter');
+  if (el) { el.value = ''; renderTrend(); }
+});
+['#trend-show-quota', '#trend-show-used', '#trend-show-total'].forEach(s =>
+  document.querySelector(s)?.addEventListener('change', renderTrend));
+
+// Render the trend chart once on initial load (independent of any job being loaded)
+document.addEventListener('DOMContentLoaded', () => { renderTrend(); });
+
+// ---- Quota change summary (only meaningful when comparing vs baseline) ----
+function renderChanges() {
+  const sec = $('#changes-section');
+  const tbody = $('#changes-tbody');
+  const totalsRow = $('#changes-totals');
+  const status = $('#changes-status');
+  if (!sec || !tbody) return;
+
+  if (!BASELINE) {
+    sec.classList.add('hidden');
+    return;
+  }
+  sec.classList.remove('hidden');
+
+  const quotaOnly   = $('#changes-quota-only').checked;
+  const rollupsTop  = $('#changes-rollups-first').checked;
+  const q = ($('#changes-filter').value || '').toLowerCase().trim();
+  const ROLLUP_FAMS = new Set(['*', 'lowPriorityCores', 'virtualMachines',
+                               'cores', 'lowPriorityVMs', 'dedicatedVCpus']);
+
+  const out = [];
+  // current rows
+  for (const r of ROWS) {
+    if (r.status !== 'OK' || !r.vm_family) continue;
+    const prev = BASELINE.rowsByKey.get(`${r.sub_guid}|${r.vm_family}`);
+    const prevQ = prev ? prev.q : null;
+    const prevU = prev ? prev.u : null;
+    const dQ = prev ? r.current_quota - prev.q : null;
+    const dU = prev ? r.current_usage - prev.u : null;
+    const matters = quotaOnly ? (dQ != null && dQ !== 0) : ((dQ != null && dQ !== 0) || (dU != null && dU !== 0));
+    if (!prev) {
+      // brand-new (sub or family) — count as added quota if non-zero
+      if (r.current_quota === 0 && r.current_usage === 0) continue;
+      out.push({ sub_name: r.sub_name, sub_guid: r.sub_guid, vm_family: r.vm_family,
+                 prevQ: null, curQ: r.current_quota, dQ: r.current_quota,
+                 prevU: null, curU: r.current_usage, dU: r.current_usage,
+                 isNew: true, isRemoved: false, isRollup: ROLLUP_FAMS.has(r.vm_family) });
+      continue;
+    }
+    if (!matters) continue;
+    out.push({ sub_name: r.sub_name, sub_guid: r.sub_guid, vm_family: r.vm_family,
+               prevQ, curQ: r.current_quota, dQ, prevU, curU: r.current_usage, dU,
+               isNew: false, isRemoved: false, isRollup: ROLLUP_FAMS.has(r.vm_family) });
+  }
+  // removed rows (in baseline, missing from current) — restricted to subs present in current run
+  const curKeys = new Set(ROWS.filter(r => r.status === 'OK' && r.vm_family)
+                              .map(r => `${r.sub_guid}|${r.vm_family}`));
+  const curSubs = new Set(ROWS.map(r => r.sub_guid));
+  for (const [k, v] of BASELINE.rowsByKey) {
+    if (curKeys.has(k)) continue;
+    const [sub_guid, vm_family] = k.split('|');
+    // Skip baseline rows whose sub isn't even in the current run — apples-to-oranges
+    if (!curSubs.has(sub_guid)) continue;
+    if (v.q === 0 && v.u === 0) continue;
+    const r0 = ROWS.find(rr => rr.sub_guid === sub_guid);
+    out.push({ sub_name: r0 ? r0.sub_name : '', sub_guid, vm_family,
+               prevQ: v.q, curQ: 0, dQ: -v.q, prevU: v.u, curU: 0, dU: -v.u,
+               isNew: false, isRemoved: true, isRollup: ROLLUP_FAMS.has(vm_family) });
+  }
+
+  // filter
+  let rows = out;
+  if (q) rows = rows.filter(r =>
+    (r.sub_name || '').toLowerCase().includes(q) ||
+    (r.sub_guid || '').includes(q) ||
+    (r.vm_family || '').toLowerCase().includes(q));
+
+  // sort: rollups first (if checked), then by |Δ quota| desc, then |Δ usage| desc
+  rows.sort((a, b) => {
+    if (rollupsTop && a.isRollup !== b.isRollup) return a.isRollup ? -1 : 1;
+    const aq = Math.abs(a.dQ || 0), bq = Math.abs(b.dQ || 0);
+    if (bq !== aq) return bq - aq;
+    return Math.abs(b.dU || 0) - Math.abs(a.dU || 0);
+  });
+
+  // totals (quota-change only)
+  const tot = rows.reduce((a, r) => {
+    a.dQ += (r.dQ || 0); a.dU += (r.dU || 0);
+    if ((r.dQ || 0) > 0) a.qUp   += r.dQ;
+    if ((r.dQ || 0) < 0) a.qDown += r.dQ;
+    return a;
+  }, { dQ: 0, dU: 0, qUp: 0, qDown: 0 });
+
+  const dColor = (d) => d > 0 ? 'delta-pos' : d < 0 ? 'delta-neg' : 'delta-zero';
+  const sgn = (d) => (d > 0 ? '+' : '') + (d || 0).toLocaleString();
+  const tag = (r) => r.isNew ? `<span class="ml-1 px-1.5 py-0.5 rounded bg-emerald-900/60 text-emerald-300 text-[10px] uppercase">new</span>` :
+                     r.isRemoved ? `<span class="ml-1 px-1.5 py-0.5 rounded bg-rose-900/60 text-rose-300 text-[10px] uppercase">removed</span>` :
+                     r.isRollup ? `<span class="ml-1 px-1.5 py-0.5 rounded bg-sky-900/60 text-sky-300 text-[10px] uppercase">rollup</span>` : '';
+
+  tbody.innerHTML = rows.length === 0
+    ? `<tr><td colspan="6" class="px-4 py-6 text-center text-slate-500">No quota deltas vs baseline${q ? ' matching filter' : ''}.</td></tr>`
+    : rows.slice(0, 1500).map(r => `
+      <tr class="${r.isRollup ? 'bg-sky-950/20' : ''}">
+        <td class="px-4 py-1.5">
+          <div class="font-medium">${escapeHtml(r.sub_name || '(unnamed)')}</div>
+          <div class="guid">${r.sub_guid}</div>
+        </td>
+        <td class="px-4 py-1.5 font-mono">${escapeHtml(r.vm_family)}${tag(r)}</td>
+        <td class="px-4 py-1.5 text-right tabular-nums">
+          <span class="text-slate-500">${r.prevQ == null ? '—' : r.prevQ.toLocaleString()}</span>
+          <span class="text-slate-600 mx-1">→</span>
+          <span>${r.curQ.toLocaleString()}</span>
+        </td>
+        <td class="px-4 py-1.5 text-right tabular-nums font-semibold ${dColor(r.dQ)}">${sgn(r.dQ)}</td>
+        <td class="px-4 py-1.5 text-right tabular-nums border-l border-slate-800">
+          <span class="text-slate-500">${r.prevU == null ? '—' : r.prevU.toLocaleString()}</span>
+          <span class="text-slate-600 mx-1">→</span>
+          <span>${r.curU.toLocaleString()}</span>
+        </td>
+        <td class="px-4 py-1.5 text-right tabular-nums ${dColor(r.dU)}">${sgn(r.dU)}</td>
+      </tr>`).join('') +
+      (rows.length > 1500 ? `<tr><td colspan="6" class="text-center text-slate-500 py-3">… ${rows.length - 1500} more rows hidden — refine filter</td></tr>` : '');
+
+  totalsRow.innerHTML = `
+    <td class="px-4 py-2" colspan="2">${rows.length.toLocaleString()} change${rows.length === 1 ? '' : 's'} ·
+      <span class="delta-pos">+${tot.qUp.toLocaleString()}</span> /
+      <span class="delta-neg">${tot.qDown.toLocaleString()}</span> quota</td>
+    <td class="px-4 py-2 text-right text-slate-500">net Δ quota</td>
+    <td class="px-4 py-2 text-right tabular-nums ${dColor(tot.dQ)}">${sgn(tot.dQ)}</td>
+    <td class="px-4 py-2 text-right text-slate-500 border-l border-slate-800">net Δ usage</td>
+    <td class="px-4 py-2 text-right tabular-nums ${dColor(tot.dU)}">${sgn(tot.dU)}</td>
+  `;
+
+  const baseWhen = BASELINE.snap.finished_at
+    ? new Date(BASELINE.snap.finished_at * 1000).toLocaleString([], { month:'numeric', day:'numeric', hour:'2-digit', minute:'2-digit' })
+    : BASELINE.id;
+  status.textContent = `vs ${baseWhen} — showing ${rows.length} sub/family pair${rows.length === 1 ? '' : 's'} where quota${quotaOnly ? '' : ' or usage'} changed`;
+}
+
+['#changes-quota-only', '#changes-rollups-first'].forEach(s =>
+  document.querySelector(s)?.addEventListener('change', renderChanges));
+$('#changes-filter')?.addEventListener('input', renderChanges);
+
+// CSV export
+$('#btn-export').onclick = () => {
+  const cols = ['sub_name','sub_guid','vm_family','current_quota','current_usage','pct_used','status','elapsed'];
+  const csv = [cols.join(','), ...ROWS.map(r => cols.map(c => {
+    const v = r[c]; if (v == null) return '';
+    const s = String(v).replace(/"/g,'""');
+    return /[",\n]/.test(s) ? `"${s}"` : s;
+  }).join(','))].join('\n');
+  const blob = new Blob([csv], {type:'text/csv'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `quota-${$('#region').value.replace(/\s/g,'')}-${Date.now()}.csv`;
+  a.click();
+};
+
+// ---- Past runs (persisted on disk) ----
+async function loadPastRunsList() {
+  try {
+    const r = await fetch('/api/jobs').then(r => r.json());
+    PAST_RUNS = (r.jobs || []).slice().sort((a, b) =>
+      (b.finished_at || b.started_at || 0) - (a.finished_at || a.started_at || 0));
+    const optHtml = PAST_RUNS.map(j => {
+      const when = j.finished_at ? new Date(j.finished_at * 1000) : new Date(j.started_at * 1000);
+      const date = when.toLocaleString([], { year:'2-digit', month:'numeric', day:'numeric', hour:'2-digit', minute:'2-digit' });
+      return `<option value="${j.id}">${date} · ${escapeHtml(j.region)} · ${escapeHtml(j.service)} · ${j.total} subs · ${j.id}</option>`;
+    }).join('');
+
+    const sel = $('#past-runs');
+    const current = sel.value;
+    sel.innerHTML = '<option value="">📂 Past runs…</option>' + optHtml;
+    if (current) sel.value = current;
+    sel.dataset.count = PAST_RUNS.length;
+
+    // Mirror into compare-to dropdown (preserve selection)
+    const cmp = $('#compare-to');
+    const cmpCur = cmp.value || '__prev__';
+    cmp.innerHTML =
+      '<option value="">⇄ Compare to: none</option>' +
+      '<option value="__prev__">⇄ Compare to: previous run (auto)</option>' +
+      optHtml;
+    cmp.value = cmpCur;
+  } catch (e) {
+    console.warn('past-runs list failed', e);
+  }
+}
+
+// ---- Baseline fetch + apply ----
+async function applyBaseline() {
+  const sel = $('#compare-to').value;
+  let baselineId = null;
+  if (sel === '__prev__') {
+    const others = PAST_RUNS.filter(j => j.id !== LOADED_JOB_ID);
+    if (others.length) baselineId = others[0].id;
+  } else if (sel) {
+    baselineId = sel;
+  }
+
+  if (!baselineId || baselineId === LOADED_JOB_ID) {
+    BASELINE = null;
+  } else if (!BASELINE || BASELINE.id !== baselineId) {
+    try {
+      const r = await fetch(`/api/job/${baselineId}/results`).then(r => r.json());
+      const rowsByKey = new Map();
+      let used = 0, quota = 0;
+      const subSet = new Set(), famSet = new Set();
+      for (const row of (r.rows || [])) {
+        if (row.status !== 'OK' || !row.vm_family) continue;
+        rowsByKey.set(`${row.sub_guid}|${row.vm_family}`,
+                      { q: row.current_quota, u: row.current_usage });
+        used += row.current_usage; quota += row.current_quota;
+        subSet.add(row.sub_guid); famSet.add(row.vm_family);
+      }
+      BASELINE = {
+        id: baselineId,
+        snap: r.snapshot,
+        rowsByKey,
+        rollupsBySub: buildRollups(r.rows || []),
+        totals: { used, quota, subs: subSet.size, fams: famSet.size },
+      };
+    } catch (e) {
+      console.warn('baseline fetch failed', e);
+      BASELINE = null;
+    }
+  }
+
+  // Show/hide Δ columns + status pill
+  document.querySelectorAll('.cmp-col').forEach(el => el.classList.toggle('hidden', !BASELINE));
+  const status = $('#compare-status');
+  if (BASELINE) {
+    const when = BASELINE.snap.finished_at
+      ? new Date(BASELINE.snap.finished_at * 1000)
+      : (BASELINE.snap.started_at ? new Date(BASELINE.snap.started_at * 1000) : null);
+    const dateStr = when ? when.toLocaleString([], { month:'numeric', day:'numeric', hour:'2-digit', minute:'2-digit' }) : BASELINE.id;
+    status.textContent = `Δ vs ${dateStr}`;
+    status.classList.remove('hidden');
+  } else {
+    status.textContent = '';
+    status.classList.add('hidden');
+  }
+}
+
+$('#compare-to').addEventListener('change', async () => {
+  if (!ROWS || !ROWS.length) { await applyBaseline(); return; }
+  await applyBaseline();
+  renderKPIs();
+  renderRollups();
+  renderTable();
+  renderQuotaGroups();
+  renderChanges();
+  applyCmpVisibility();
+});
+$('#past-runs').addEventListener('change', () => {
+  const hasPick = !!$('#past-runs').value;
+  $('#btn-load').classList.toggle('hidden', !hasPick);
+  $('#btn-delete').classList.toggle('hidden', !hasPick);
+});
+$('#btn-load').onclick = async () => {
+  const id = $('#past-runs').value;
+  if (!id) return;
+  // Sync the region/service inputs to match the loaded job for clarity
+  try {
+    const snap = await fetch(`/api/job/${id}`).then(r => r.json());
+    if (snap.region)  $('#region').value  = snap.region;
+    if (snap.service) $('#service').value = snap.service;
+  } catch {}
+  $('#progress-wrap').classList.add('hidden');
+  await loadResults(id);
+  $('#progress-label').textContent = `Loaded past run ${id}`;
+};
+$('#btn-delete').onclick = async () => {
+  const id = $('#past-runs').value;
+  if (!id) return;
+  if (!confirm(`Delete saved run ${id}?`)) return;
+  await fetch(`/api/job/${id}`, { method: 'DELETE' });
+  await loadPastRunsList();
+  $('#btn-load').classList.add('hidden');
+  $('#btn-delete').classList.add('hidden');
+};
+
+refreshAuth();
+loadSubs();
+loadPastRunsList();
+</script>
+</body>
+</html>
