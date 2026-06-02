@@ -273,7 +273,7 @@ async def fetch_quota(client: httpx.AsyncClient, sub_guid: str, region: str, ser
         }
         sku_count = len(sku_usages)
         tag = "OK" if sku_count else "EMPTY"
-        print(f"[arm] sub={short_sub} {tag:5} {sku_count:>3} SKUs · {elapsed:5.1f}s", flush=True)
+        print(f"[arm] sub={short_sub} {tag:5} {sku_count:>3} SKUs in {elapsed:5.1f}s", flush=True)
         return {"sub_guid": sub_guid, "status": "OK", "http": 200,
                 "data": adapted, "elapsed": round(elapsed, 1)}
     except httpx.TimeoutException:
@@ -581,7 +581,7 @@ async def run_job(job: Job) -> None:
                     row["sub_name"] = name_by_id.get(row["sub_guid"], "")
                 job.priority_breakdown = pb
                 print(f"[job {job.id}] priority breakdown: "
-                       f"OD {pb['totals']['od_cores']} cores / {pb['totals']['od_vms']} VMs · "
+                       f"OD {pb['totals']['od_cores']} cores / {pb['totals']['od_vms']} VMs | "
                        f"Spot {pb['totals']['spot_cores']} cores / {pb['totals']['spot_vms']} VMs",
                        flush=True)
         except Exception as e:
@@ -591,12 +591,12 @@ async def run_job(job: Job) -> None:
     empty = sum(1 for x in job.results if x["status"] == "OK" and not x.get("data", {}).get("SkuUsages"))
     err = sum(1 for x in job.results if x["status"] != "OK")
     elapsed = time.time() - job.started_at
-    print(f"[job {job.id}] DONE in {elapsed:.1f}s · ok={ok} empty={empty} err={err}", flush=True)
+    print(f"[job {job.id}] DONE in {elapsed:.1f}s | ok={ok} empty={empty} err={err}", flush=True)
     job.status = "done"
     job.finished_at = time.time()
     try:
         persist_job(job)
-        print(f"[job {job.id}] persisted → {_job_path(job.id).name}", flush=True)
+        print(f"[job {job.id}] persisted to {_job_path(job.id).name}", flush=True)
     except Exception as e:
         print(f"[job {job.id}] PERSIST FAIL: {e}", flush=True)
     await job.queue.put({"type": "done", "snapshot": job.snapshot()})
