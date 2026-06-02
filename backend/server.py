@@ -1,7 +1,8 @@
 """
 Azure Quota Dashboard — backend.
 
-Customer-facing port of the internal Lionrock dashboard. Hits Azure ARM directly:
+Self-hosted dashboard that hits Azure ARM directly for compute quota usage,
+plus Resource Graph for the per-VM-family OD vs Spot breakdown.
 
   Token scope: https://management.azure.com/.default
   Auth:        local `az` CLI, MSAL device-code (Azure CLI well-known clientId), or paste-token
@@ -11,17 +12,16 @@ Customer-facing port of the internal Lionrock dashboard. Hits Azure ARM directly
         /locations/{region}/usages?api-version=2024-07-01                     → quota usage
     POST /providers/Microsoft.ResourceGraph/resources?api-version=2022-10-01  → per-family OD vs Spot
 
-  Response from Compute usages:
+  Compute usages response shape:
     { value: [{ name:{value, localizedValue}, currentValue, limit, unit }, ...] }
-  We adapt that into the existing { SkuUsages: [{VmFamily, CurrentQuota, CurrentUsage}] }
-  shape so the entire frontend (KPIs, deltas, trend, groups) keeps working.
+  We adapt that into { SkuUsages: [{VmFamily, CurrentQuota, CurrentUsage}] }
+  internally so the frontend (KPIs, deltas, trend, groups) is data-shape agnostic.
 
   Requires no app registration: uses the public Azure CLI clientId
   (04b07795-8ddb-461a-bbee-02f9e1bf7b46), which is pre-consented for ARM
   in every Entra tenant.
 
-Persistence: data/jobs/{id}.json — same shape as the internal build, so the
-trend chart code is identical.
+Persistence: data/jobs/{id}.json — one file per snapshot.
 
 Cost: zero. ARM Compute usages, Resource Graph, and /subscriptions are all
 free. The dashboard runs locally on the user's machine.
@@ -56,7 +56,7 @@ JOBS_DIR.mkdir(parents=True, exist_ok=True)
 ARM_BASE   = "https://management.azure.com"
 ARM_SCOPE  = "https://management.azure.com/.default"
 # Public well-known clientId of the Azure CLI — pre-consented for ARM
-# in every Entra tenant, so the customer doesn't need to register an app.
+# in every Entra tenant, so users don't need to register their own app.
 CLIENT_ID  = "04b07795-8ddb-461a-bbee-02f9e1bf7b46"
 # We default to "organizations" so any work/school account in any tenant works.
 AUTHORITY  = "https://login.microsoftonline.com/organizations"
@@ -221,14 +221,14 @@ async def fetch_subscriptions(client: httpx.AsyncClient, token: str) -> list[dic
 
 
 # ---------------------------------------------------------------------------
-# ARM Compute usages caller — adapts response to Lionrock's SkuUsages shape
+# ARM Compute usages caller — produces a uniform internal SkuUsages shape
 # ---------------------------------------------------------------------------
 async def fetch_quota(client: httpx.AsyncClient, sub_guid: str, region: str, service: str,
                        token: str) -> dict:
     """Fetch per-family quota usage for a single sub+region from ARM Compute API.
 
     Adapts Compute usages response into { SubscriptionId, Cloud, SkuUsages:[...] }
-    shape so the existing frontend works unchanged.
+    shape used internally by the dashboard.
     """
     # `service` is currently always 'compute' — kept as a parameter for forward
     # compatibility (storage, network, etc. expose the same usages pattern).
@@ -251,7 +251,7 @@ async def fetch_quota(client: httpx.AsyncClient, sub_guid: str, region: str, ser
         except Exception as je:
             return {"sub_guid": sub_guid, "status": "ERROR", "http": 200,
                     "error": f"non-JSON: {je}", "elapsed": round(elapsed, 1)}
-        # Adapt to Lionrock-shaped payload
+        # Adapt to internal SkuUsages-shape payload
         sku_usages = []
         for v in raw.get("value", []):
             name_obj = v.get("name") or {}
@@ -295,7 +295,7 @@ def _url_encode(s: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Resource Graph — per-family OD vs Spot core usage (the Lionrock-can't-do-this feature)
+# Resource Graph — per-family OD vs Spot core usage
 # ---------------------------------------------------------------------------
 async def fetch_vm_priority_breakdown(client: httpx.AsyncClient, sub_guids: list[str],
                                         region: str, token: str) -> dict:

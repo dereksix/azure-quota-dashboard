@@ -66,7 +66,7 @@
 
       <button id="m-paste" class="w-full text-left bg-slate-800 hover:bg-slate-700 rounded-lg p-3 border border-slate-700">
         <div class="font-semibold text-amber-400">📋 Paste bearer token</div>
-        <div class="text-xs text-slate-400 mt-1">Grab a token from DevTools on <code>lionrock.azurefd.net</code> (Network → any request → Authorization header).</div>
+        <div class="text-xs text-slate-400 mt-1">Use any ARM token (<code>management.azure.com</code> audience) — useful in CI or kiosk scenarios.</div>
       </button>
     </div>
 
@@ -83,9 +83,8 @@
     <!-- Paste panel -->
     <div id="auth-paste" class="hidden space-y-3">
       <div class="text-xs text-slate-400 space-y-1">
-        <div>1. Open <code>https://lionrock.azurefd.net/quota/create-request</code> in another tab and sign in.</div>
-        <div>2. F12 → Network → click any <code>lionrock-prod.microsoftlionrock.com</code> request.</div>
-        <div>3. Copy the <code>authorization</code> request header value (starts with <code>Bearer eyJ…</code>).</div>
+        <div>Paste any bearer token whose audience is <code>https://management.azure.com</code>.</div>
+        <div>Easiest source: <code>az account get-access-token --resource https://management.azure.com</code></div>
       </div>
       <textarea id="paste-input" rows="5" placeholder="Bearer eyJ0eXAiOiJKV1Q..." class="w-full bg-slate-950 border border-slate-700 rounded-md p-2 text-xs font-mono focus:border-sky-500 outline-none"></textarea>
       <div class="flex gap-2">
@@ -341,7 +340,7 @@
       <div class="font-semibold">📈 Historical trend · vCPU usage per day (OD vs Spot vs Total)</div>
       <span id="trend-status" class="text-[11px] text-slate-500"></span>
       <div class="ml-auto flex items-center gap-2 text-xs">
-        <input id="trend-filter" type="search" placeholder="filter by sub name/GUID (e.g. CSI)…"
+        <input id="trend-filter" type="search" placeholder="filter by sub name/GUID…"
                class="bg-slate-950 border border-slate-700 rounded px-2 py-1 text-xs text-slate-200 placeholder:text-slate-600 w-64">
         <button id="trend-clear" type="button"
                 class="text-[11px] text-slate-400 hover:text-slate-200 underline-offset-2 hover:underline">clear</button>
@@ -541,7 +540,7 @@
 </main>
 
 <footer class="text-center text-xs text-slate-600 py-6">
-  Data source: <code>lionrock-prod.microsoftlionrock.com/api/selfService/info/ARM/...</code>
+  Data sources: <code>management.azure.com</code> (ARM Compute usages) &middot; <code>Microsoft.ResourceGraph</code> (VM inventory)
 </footer>
 
 <script>
@@ -681,8 +680,8 @@ $('#paste-submit').onclick = async () => {
 // ---- Load subs ----
 let SUB_SELECTION = null;   // null = no manual override → use #sub-filter; Set<guid> when picker is used
 
-// Heuristic: legacy USGov-named subs from internal use. Disabled by default
-// in the customer build — most customers don't need this.
+// Heuristic: USGov subs sometimes have UPPER_SNAKE_CASE names. Off by default;
+// enable if you want to skip those when running against Public cloud only.
 function isLikelyGovSub(name) {
   if (!name) return false;
   if (!name.includes('_')) return false;
@@ -1382,7 +1381,7 @@ function renderFocusedChart() {
   $('#chart-sub-fam').parentElement.style.height = target + 'px';
 }
 
-// Heuristic family classification — Lionrock returns mixed compute/disk/network SKUs
+// Heuristic family classification — Azure quota responses include mixed compute/disk/network SKUs
 // even when you query service=compute, so we need to bucket them client-side.
 function familyCategory(name) {
   if (!name) return 'other';
@@ -1396,7 +1395,7 @@ function familyCategory(name) {
   return 'other';
 }
 
-// Classify a Lionrock VmFamily string (e.g. "standardDADSv5Family", "standardNCASv3T4Family")
+// Classify a VmFamily string (e.g. "standardDADSv5Family", "standardNCASv3T4Family")
 // into one of Azure's published quota groups. Falls back to 'Other / unclassified'.
 // Reference: Azure VM size series taxonomy (general purpose / compute / memory / storage / GPU / HPC / confidential).
 function vmFamilyGroup(name) {
