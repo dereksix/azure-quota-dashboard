@@ -14,3 +14,6 @@ data/jobs/*.json
 Thumbs.db
 .vscode/
 .idea/
+
+# Logs
+*.log
