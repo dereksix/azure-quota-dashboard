@@ -340,11 +340,10 @@ Resources
     query = (
         "Resources "
         "| where type =~ 'microsoft.compute/virtualmachines' "
-        f"| where tolower(location) == tolower('{region}') "
         "| extend size = tostring(properties.hardwareProfile.vmSize), "
         "         priority = iff(isempty(tostring(properties.priority)) or "
         "                        tostring(properties.priority) =~ 'Regular', 'OD', 'Spot') "
-        "| summarize vms = count() by subscriptionId, size, priority"
+        "| summarize vms = count() by subscriptionId, location, size, priority"
     )
 
     payload = {
@@ -373,23 +372,30 @@ Resources
     cols = [c["name"] for c in body.get("data", {}).get("columns", [])]
     rg_rows = body.get("data", {}).get("rows", [])
 
-    # Look up cores+family per size from Compute SKUs (one call per region — cheap).
-    sku_meta = await fetch_compute_sku_meta(client, sub_guids[0], region, token)
-
     out_rows: list[dict] = []
     totals = {"od_cores": 0, "spot_cores": 0, "od_vms": 0, "spot_vms": 0}
+    sku_meta_cache: dict[str, dict] = {}
     for row in rg_rows:
         d = dict(zip(cols, row))
         sub_id   = (d.get("subscriptionId") or "").lower()
+        location = (d.get("location") or "").lower()
         size     = d.get("size") or ""
         priority = d.get("priority") or "OD"
         vms      = int(d.get("vms") or 0)
-        meta     = sku_meta.get(size.lower(), {})
-        cores    = vms * int(meta.get("vCPUs") or 0)
-        family   = meta.get("family") or "(unknown)"
+        # Resolve family + vCPUs per region, cached.
+        if location and location not in sku_meta_cache:
+            try:
+                sku_meta_cache[location] = await fetch_compute_sku_meta(
+                    client, sub_guids[0], location, token)
+            except Exception:
+                sku_meta_cache[location] = {}
+        meta = sku_meta_cache.get(location, {}).get(size.lower(), {})
+        cores  = vms * int(meta.get("vCPUs") or 0)
+        family = meta.get("family") or "(unknown)"
         out_rows.append({
-            "sub_guid": sub_id, "size": size, "family": family,
-            "priority": priority, "vms": vms, "cores": cores,
+            "sub_guid": sub_id, "location": location, "size": size,
+            "family": family, "priority": priority,
+            "vms": vms, "cores": cores,
         })
         if priority == "Spot":
             totals["spot_cores"] += cores
@@ -630,6 +636,47 @@ async def api_subs() -> JSONResponse:
         except httpx.HTTPStatusError as e:
             raise HTTPException(e.response.status_code, e.response.text[:300])
     return JSONResponse(subs)
+
+
+@app.get("/api/locations")
+async def api_locations() -> JSONResponse:
+    """Return Azure regions available to the signed-in user.
+
+    Uses the first readable subscription as the scope (locations are tenant-wide,
+    but the API is scoped to a sub). Returns physical (non-logical) regions only,
+    sorted by display name.
+    """
+    try:
+        token = get_token()
+    except Exception as e:
+        raise HTTPException(401, str(e))
+    async with httpx.AsyncClient() as client:
+        try:
+            subs = await fetch_subscriptions(client, token)
+        except httpx.HTTPStatusError as e:
+            raise HTTPException(e.response.status_code, e.response.text[:300])
+        if not subs:
+            return JSONResponse([])
+        sub_guid = subs[0]["sub_guid"]
+        url = f"{ARM_BASE}/subscriptions/{sub_guid}/locations?api-version=2022-12-01"
+        try:
+            r = await client.get(url, headers={"Authorization": f"Bearer {token}"}, timeout=30)
+            r.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            raise HTTPException(e.response.status_code, e.response.text[:300])
+        data = r.json().get("value", [])
+        # Filter to physical Azure regions and surface a clean payload.
+        out = []
+        for loc in data:
+            if loc.get("metadata", {}).get("regionType") != "Physical":
+                continue
+            out.append({
+                "name": loc.get("name"),
+                "display_name": loc.get("displayName"),
+                "geography": loc.get("metadata", {}).get("geographyGroup"),
+            })
+        out.sort(key=lambda x: (x.get("geography") or "", x.get("display_name") or ""))
+    return JSONResponse(out)
 
 
 @app.get("/api/auth/status")

@@ -130,8 +130,25 @@
           <option>westus</option><option>westus2</option><option>westus3</option>
           <option>southcentralus</option><option>northcentralus</option>
           <option>westeurope</option><option>northeurope</option>
+          <option>uksouth</option><option>ukwest</option>
+          <option>francecentral</option><option>germanywestcentral</option>
+          <option>switzerlandnorth</option><option>swedencentral</option>
+          <option>norwayeast</option><option>polandcentral</option>
+          <option>italynorth</option><option>spaincentral</option>
+          <option>centralindia</option><option>southindia</option><option>westindia</option>
+          <option>jioindiacentral</option><option>jioindiawest</option>
           <option>southeastasia</option><option>eastasia</option>
-          <option>australiaeast</option><option>uksouth</option>
+          <option>japaneast</option><option>japanwest</option>
+          <option>koreacentral</option><option>koreasouth</option>
+          <option>australiaeast</option><option>australiasoutheast</option>
+          <option>australiacentral</option>
+          <option>canadacentral</option><option>canadaeast</option>
+          <option>brazilsouth</option><option>brazilsoutheast</option>
+          <option>mexicocentral</option>
+          <option>uaenorth</option><option>qatarcentral</option>
+          <option>israelcentral</option><option>southafricanorth</option>
+          <option>indonesiacentral</option><option>malaysiawest</option>
+          <option>newzealandnorth</option>
         </datalist>
       </div>
       <div>
@@ -370,7 +387,7 @@
     <div class="p-4 flex flex-wrap items-center gap-3 border-b border-slate-800">
       <div class="font-semibold text-fuchsia-300">⚡ OD vs Spot by VM family · live VM inventory</div>
       <span id="priority-totals" class="text-xs text-slate-400"></span>
-      <span class="text-[11px] text-slate-500 ml-auto">Source: Azure Resource Graph · counts running VMs by SKU and priority</span>
+      <span class="text-[11px] text-slate-500 ml-auto">Source: Azure Resource Graph · all selected subs · all regions</span>
     </div>
     <div class="overflow-x-auto" style="max-height:480px;">
       <table class="w-full text-xs">
@@ -383,6 +400,7 @@
             <th class="text-right px-4 py-2">Spot cores</th>
             <th class="text-right px-4 py-2">Total cores</th>
             <th class="text-right px-4 py-2">Spot share</th>
+            <th class="text-left  px-4 py-2">Regions</th>
           </tr>
         </thead>
         <tbody id="priority-tbody" class="divide-y divide-slate-800"></tbody>
@@ -390,6 +408,9 @@
           <tr id="priority-totals-row"></tr>
         </tfoot>
       </table>
+    </div>
+    <div id="priority-empty" class="hidden p-4 text-xs text-slate-400">
+      No VMs found in the selected subscriptions. Confirm you have <code>Reader</code> on the subs and that VMs exist there. This view is a live Azure Resource Graph query — there is no local cache.
     </div>
   </section>
 
@@ -738,6 +759,33 @@ async function loadSubs() {
   SUBS.sort((a, b) => (a.sub_name || '').localeCompare(b.sub_name || ''));
   $('#sub-count').textContent = SUBS.length.toLocaleString();
   refreshSubMatched();
+  loadLocations();
+}
+
+async function loadLocations() {
+  try {
+    const resp = await fetch('/api/locations');
+    if (!resp.ok) return;
+    const locs = await resp.json();
+    if (!Array.isArray(locs) || locs.length === 0) return;
+    const dl = document.getElementById('region-list');
+    if (!dl) return;
+    // Group by geography for nicer scanning. <option> in <datalist> can use
+    // both `value` (what gets typed) and the text content (shown next to it).
+    const groups = new Map();
+    for (const l of locs) {
+      const g = l.geography || 'Other';
+      if (!groups.has(g)) groups.set(g, []);
+      groups.get(g).push(l);
+    }
+    const html = [];
+    for (const [g, items] of [...groups.entries()].sort()) {
+      for (const l of items) {
+        html.push(`<option value="${l.name}">${l.display_name} · ${g}</option>`);
+      }
+    }
+    dl.innerHTML = html.join('');
+  } catch (e) { /* keep static fallback list */ }
 }
 
 $('#sub-filter').addEventListener('input', () => {
@@ -959,16 +1007,24 @@ let LAST_PRIORITY = null;
 function renderPriority() {
   const sec = document.getElementById('priority-section');
   if (!sec) return;
+  sec.classList.remove('hidden');
+  const empty = document.getElementById('priority-empty');
+  const tbody = document.getElementById('priority-tbody');
+  const totRow = document.getElementById('priority-totals-row');
   if (!LAST_PRIORITY || !LAST_PRIORITY.rows || LAST_PRIORITY.rows.length === 0) {
-    sec.classList.add('hidden');
+    if (empty) empty.classList.remove('hidden');
+    if (tbody) tbody.innerHTML = '';
+    if (totRow) totRow.innerHTML = '';
+    document.getElementById('priority-totals').textContent =
+      LAST_PRIORITY ? '0 VMs found in selected subs' : '';
     return;
   }
-  sec.classList.remove('hidden');
-  // Aggregate rows by family
+  if (empty) empty.classList.add('hidden');
+  // Aggregate rows by family (across regions); track which regions are present.
   const byFam = new Map();
   for (const row of LAST_PRIORITY.rows) {
     const k = row.family || '(unknown)';
-    const cur = byFam.get(k) || { family: k, od_vms: 0, od_cores: 0, spot_vms: 0, spot_cores: 0 };
+    const cur = byFam.get(k) || { family: k, od_vms: 0, od_cores: 0, spot_vms: 0, spot_cores: 0, regions: new Set() };
     if (row.priority === 'Spot') {
       cur.spot_vms   += row.vms   || 0;
       cur.spot_cores += row.cores || 0;
@@ -976,6 +1032,7 @@ function renderPriority() {
       cur.od_vms   += row.vms   || 0;
       cur.od_cores += row.cores || 0;
     }
+    if (row.location) cur.regions.add(row.location);
     byFam.set(k, cur);
   }
   const rows = [...byFam.values()];
@@ -984,9 +1041,10 @@ function renderPriority() {
   document.getElementById('priority-totals').textContent =
     `${(tot.od_vms + tot.spot_vms).toLocaleString()} VMs · ${(tot.od_cores + tot.spot_cores).toLocaleString()} cores total · OD ${tot.od_cores.toLocaleString()} cores / Spot ${tot.spot_cores.toLocaleString()} cores`;
 
-  document.getElementById('priority-tbody').innerHTML = rows.map(r => {
+  tbody.innerHTML = rows.map(r => {
     const total = r.od_cores + r.spot_cores;
     const spotPct = total > 0 ? (r.spot_cores / total * 100) : 0;
+    const regs = [...r.regions].sort().join(', ');
     return `<tr class="hover:bg-slate-800/30">
       <td class="px-4 py-2 font-mono text-slate-200">${esc(r.family)}</td>
       <td class="px-4 py-2 text-right">${r.od_vms.toLocaleString()}</td>
@@ -995,18 +1053,20 @@ function renderPriority() {
       <td class="px-4 py-2 text-right text-fuchsia-300">${r.spot_cores.toLocaleString()}</td>
       <td class="px-4 py-2 text-right font-semibold">${total.toLocaleString()}</td>
       <td class="px-4 py-2 text-right ${spotPct >= 50 ? 'text-fuchsia-300' : 'text-slate-300'}">${spotPct.toFixed(0)}%</td>
+      <td class="px-4 py-2 text-slate-400 text-[11px]">${esc(regs)}</td>
     </tr>`;
   }).join('');
   const totalCores = tot.od_cores + tot.spot_cores;
   const spotShare = totalCores > 0 ? (tot.spot_cores / totalCores * 100) : 0;
-  document.getElementById('priority-totals-row').innerHTML = `
+  totRow.innerHTML = `
     <td class="px-4 py-2">Total · ${rows.length} families</td>
     <td class="px-4 py-2 text-right">${tot.od_vms.toLocaleString()}</td>
     <td class="px-4 py-2 text-right text-sky-300">${tot.od_cores.toLocaleString()}</td>
     <td class="px-4 py-2 text-right">${tot.spot_vms.toLocaleString()}</td>
     <td class="px-4 py-2 text-right text-fuchsia-300">${tot.spot_cores.toLocaleString()}</td>
     <td class="px-4 py-2 text-right">${totalCores.toLocaleString()}</td>
-    <td class="px-4 py-2 text-right">${spotShare.toFixed(0)}%</td>`;
+    <td class="px-4 py-2 text-right">${spotShare.toFixed(0)}%</td>
+    <td></td>`;
 }
 
 function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
