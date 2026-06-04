@@ -387,8 +387,9 @@
     <div class="p-4 flex flex-wrap items-center gap-3 border-b border-slate-800">
       <div class="font-semibold text-fuchsia-300">⚡ OD vs Spot by VM family · live VM inventory</div>
       <span id="priority-totals" class="text-xs text-slate-400"></span>
-      <span class="text-[11px] text-slate-500 ml-auto">Source: Azure Resource Graph · all selected subs · all regions</span>
+      <span class="text-[11px] text-slate-500 ml-auto">Source: Azure Resource Graph · scoped to selected region</span>
     </div>
+    <div id="priority-other-regions" class="hidden px-4 py-2 text-[11px] text-amber-300 bg-amber-900/20 border-b border-amber-800/40"></div>
     <div class="overflow-x-auto" style="max-height:480px;">
       <table class="w-full text-xs">
         <thead class="bg-slate-950/60 text-slate-400 sticky top-0">
@@ -400,7 +401,6 @@
             <th class="text-right px-4 py-2">Spot cores</th>
             <th class="text-right px-4 py-2">Total cores</th>
             <th class="text-right px-4 py-2">Spot share</th>
-            <th class="text-left  px-4 py-2">Regions</th>
           </tr>
         </thead>
         <tbody id="priority-tbody" class="divide-y divide-slate-800"></tbody>
@@ -410,50 +410,39 @@
       </table>
     </div>
     <div id="priority-empty" class="hidden p-4 text-xs text-slate-400">
-      No VMs found in the selected subscriptions. Confirm you have <code>Reader</code> on the subs and that VMs exist there. This view is a live Azure Resource Graph query — there is no local cache.
+      No VMs found in this region for the selected subscriptions. Live Azure Resource Graph query — there is no local cache.
     </div>
   </section>
 
-  <!-- VM family quota groups (hypothetical "what if quota groups" view) -->
+  <!-- Microsoft.Quota Group Quotas (real Azure construct, MG-scoped) -->
   <section id="qgroups-section" class="hidden bg-slate-900/60 border border-slate-800 rounded-xl">
     <div class="p-4 flex flex-wrap items-center gap-3 border-b border-slate-800">
-      <div class="font-semibold">🧮 Quota groups · aggregated quota vs usage by VM family group</div>
-      <span id="qgroups-scope" class="text-[11px] text-slate-400">across 0 subs</span>
-      <span class="text-[11px] text-slate-500">Groups follow Azure VM-series families (General Purpose, Compute, Memory, Storage, GPU, HPC, Confidential)</span>
-      <div class="ml-auto flex items-center gap-2 text-xs">
-        <input id="qgroups-filter" type="search" placeholder="filter by sub name/GUID…"
-               class="bg-slate-950 border border-slate-700 rounded px-2 py-1 text-xs text-slate-200 placeholder:text-slate-600 w-56">
-        <button id="qgroups-clear" type="button"
-                class="text-[11px] text-slate-400 hover:text-slate-200 underline-offset-2 hover:underline">clear</button>
-        <label class="flex items-center gap-1.5 cursor-pointer select-none text-slate-300">
-          <input id="qgroups-by-sub" type="checkbox" class="accent-sky-500">
-          per subscription
-        </label>
-        <label class="flex items-center gap-1.5 cursor-pointer select-none text-slate-300">
-          <input id="qgroups-hide-zero" type="checkbox" class="accent-sky-500" checked>
-          hide groups with no allocation
-        </label>
-      </div>
+      <div class="font-semibold">🧮 Quota groups · <span class="font-mono text-[11px] text-slate-400">Microsoft.Quota/groupQuotas</span></div>
+      <span id="qgroups-scope" class="text-[11px] text-slate-400"></span>
+      <span class="text-[11px] text-slate-500">Real shared-quota constructs configured at management-group scope</span>
+      <button id="qgroups-refresh" type="button"
+              class="ml-auto text-[11px] text-slate-300 hover:text-white px-2 py-1 rounded border border-slate-700 hover:border-slate-500">↻ refresh</button>
     </div>
+    <div id="qgroups-empty" class="hidden p-4 text-xs text-slate-400 leading-relaxed">
+      <div class="text-slate-300 mb-1">No <span class="font-mono">Microsoft.Quota</span> group quotas configured.</div>
+      Group Quotas let you pool VM-family quota across subscriptions inside a management group, then allocate to member subs as needed.
+      <a href="https://learn.microsoft.com/azure/quotas/quota-groups" target="_blank" rel="noopener" class="text-sky-400 hover:text-sky-300 underline">Learn how to set them up →</a>
+    </div>
+    <div id="qgroups-error" class="hidden px-4 py-2 text-[11px] text-amber-300 bg-amber-900/20 border-b border-amber-800/40"></div>
     <div class="overflow-x-auto" style="max-height:480px;">
       <table class="w-full text-xs">
         <thead class="bg-slate-950/60 text-slate-400 sticky top-0">
           <tr>
-            <th class="text-left px-4 py-2">Quota group</th>
-            <th class="text-left px-4 py-2 qgroups-sub-col hidden">Subscription</th>
-            <th class="text-right px-4 py-2">Families</th>
-            <th class="text-right px-4 py-2">Total quota</th>
-            <th class="text-right px-4 py-2 cmp-col hidden">Δ quota</th>
-            <th class="text-right px-4 py-2">Total used</th>
-            <th class="text-right px-4 py-2 cmp-col hidden">Δ used</th>
-            <th class="text-left px-4 py-2 w-1/4">% used</th>
-            <th class="text-right px-4 py-2">Headroom</th>
+            <th class="text-left  px-4 py-2">Group</th>
+            <th class="text-left  px-4 py-2">Management group</th>
+            <th class="text-right px-4 py-2">Member subs</th>
+            <th class="text-left  px-4 py-2">Resource</th>
+            <th class="text-right px-4 py-2">Group limit</th>
+            <th class="text-left  px-4 py-2">Unit</th>
+            <th class="text-left  px-4 py-2">Comment</th>
           </tr>
         </thead>
         <tbody id="qgroups-tbody" class="divide-y divide-slate-800"></tbody>
-        <tfoot class="bg-slate-950/40 font-semibold border-t-2 border-slate-700 text-xs">
-          <tr id="qgroups-totals"></tr>
-        </tfoot>
       </table>
     </div>
   </section>
@@ -1008,23 +997,43 @@ function renderPriority() {
   const sec = document.getElementById('priority-section');
   if (!sec) return;
   sec.classList.remove('hidden');
-  const empty = document.getElementById('priority-empty');
-  const tbody = document.getElementById('priority-tbody');
+  const empty  = document.getElementById('priority-empty');
+  const tbody  = document.getElementById('priority-tbody');
   const totRow = document.getElementById('priority-totals-row');
+  const banner = document.getElementById('priority-other-regions');
+
+  // "Look elsewhere" hint, regardless of whether the selected region has rows.
+  const others = (LAST_PRIORITY && Array.isArray(LAST_PRIORITY.other_regions))
+    ? LAST_PRIORITY.other_regions : [];
+  const otherSpot = others.filter(r => (r.spot_vms || 0) > 0);
+  if (banner) {
+    if (otherSpot.length > 0) {
+      const sample = otherSpot.slice(0, 3).map(r =>
+        `<span class="font-mono">${esc(r.location)}</span> (${r.spot_vms} VMs / ${r.spot_cores} cores)`
+      ).join(', ');
+      const more = otherSpot.length > 3 ? `, +${otherSpot.length - 3} more` : '';
+      banner.innerHTML = `💡 Spot VMs are also running in other regions outside the selected scope: ${sample}${more}. Switch the region picker to see them in this table.`;
+      banner.classList.remove('hidden');
+    } else {
+      banner.classList.add('hidden');
+      banner.innerHTML = '';
+    }
+  }
+
   if (!LAST_PRIORITY || !LAST_PRIORITY.rows || LAST_PRIORITY.rows.length === 0) {
-    if (empty) empty.classList.remove('hidden');
-    if (tbody) tbody.innerHTML = '';
+    if (empty)  empty.classList.remove('hidden');
+    if (tbody)  tbody.innerHTML = '';
     if (totRow) totRow.innerHTML = '';
     document.getElementById('priority-totals').textContent =
-      LAST_PRIORITY ? '0 VMs found in selected subs' : '';
+      LAST_PRIORITY ? '0 VMs in this region' : '';
     return;
   }
   if (empty) empty.classList.add('hidden');
-  // Aggregate rows by family (across regions); track which regions are present.
+  // Aggregate rows by family within the selected region.
   const byFam = new Map();
   for (const row of LAST_PRIORITY.rows) {
     const k = row.family || '(unknown)';
-    const cur = byFam.get(k) || { family: k, od_vms: 0, od_cores: 0, spot_vms: 0, spot_cores: 0, regions: new Set() };
+    const cur = byFam.get(k) || { family: k, od_vms: 0, od_cores: 0, spot_vms: 0, spot_cores: 0 };
     if (row.priority === 'Spot') {
       cur.spot_vms   += row.vms   || 0;
       cur.spot_cores += row.cores || 0;
@@ -1032,7 +1041,6 @@ function renderPriority() {
       cur.od_vms   += row.vms   || 0;
       cur.od_cores += row.cores || 0;
     }
-    if (row.location) cur.regions.add(row.location);
     byFam.set(k, cur);
   }
   const rows = [...byFam.values()];
@@ -1044,7 +1052,6 @@ function renderPriority() {
   tbody.innerHTML = rows.map(r => {
     const total = r.od_cores + r.spot_cores;
     const spotPct = total > 0 ? (r.spot_cores / total * 100) : 0;
-    const regs = [...r.regions].sort().join(', ');
     return `<tr class="hover:bg-slate-800/30">
       <td class="px-4 py-2 font-mono text-slate-200">${esc(r.family)}</td>
       <td class="px-4 py-2 text-right">${r.od_vms.toLocaleString()}</td>
@@ -1053,7 +1060,6 @@ function renderPriority() {
       <td class="px-4 py-2 text-right text-fuchsia-300">${r.spot_cores.toLocaleString()}</td>
       <td class="px-4 py-2 text-right font-semibold">${total.toLocaleString()}</td>
       <td class="px-4 py-2 text-right ${spotPct >= 50 ? 'text-fuchsia-300' : 'text-slate-300'}">${spotPct.toFixed(0)}%</td>
-      <td class="px-4 py-2 text-slate-400 text-[11px]">${esc(regs)}</td>
     </tr>`;
   }).join('');
   const totalCores = tot.od_cores + tot.spot_cores;
@@ -1065,8 +1071,7 @@ function renderPriority() {
     <td class="px-4 py-2 text-right">${tot.spot_vms.toLocaleString()}</td>
     <td class="px-4 py-2 text-right text-fuchsia-300">${tot.spot_cores.toLocaleString()}</td>
     <td class="px-4 py-2 text-right">${totalCores.toLocaleString()}</td>
-    <td class="px-4 py-2 text-right">${spotShare.toFixed(0)}%</td>
-    <td></td>`;
+    <td class="px-4 py-2 text-right">${spotShare.toFixed(0)}%</td>`;
 }
 
 function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
@@ -1830,160 +1835,102 @@ async function renderTrend() {
 }
 
 // ---- VM family quota groups (hypothetical "what if quota groups were used") ----
-// Aggregates per-family quota & usage into Azure's published series groups, optionally
-// further split per subscription. Skips rollup wildcards (`*`, `lowPriorityCores`, etc.)
-// because those already aggregate across all families and would double-count.
-function renderQuotaGroups() {
-  const sec = $('#qgroups-section');
-  const tbody = $('#qgroups-tbody');
-  const totalsRow = $('#qgroups-totals');
-  if (!sec || !tbody) return;
+// ---- Microsoft.Quota Group Quotas (real, MG-scoped Azure construct) ----
+// Pulls from /api/quota-groups which walks management groups the user can read
+// and enumerates Microsoft.Quota/groupQuotas under each. Renders each (group,
+// quota) pair as a row, or an empty state if the tenant has none configured.
+let QUOTA_GROUPS_PAYLOAD = null;
 
-  const ok = okRows();
-  if (!ok.length) { sec.classList.add('hidden'); return; }
-  sec.classList.remove('hidden');
-
-  const bySub  = $('#qgroups-by-sub').checked;
-  const hideZero = $('#qgroups-hide-zero').checked;
-  const subQ = ($('#qgroups-filter')?.value || '').trim().toLowerCase();
-  const ROLLUP_FAMS = new Set(['*', 'lowPriorityCores', 'virtualMachines',
-                               'cores', 'lowPriorityVMs', 'dedicatedVCpus',
-                               'availabilitySets', 'virtualMachineScaleSets', 'cloudServices']);
-
-  // Toggle the per-sub column visibility
-  document.querySelectorAll('.qgroups-sub-col').forEach(el => el.classList.toggle('hidden', !bySub));
-
-  // Apply optional sub-name/GUID filter to the input rows; track scoped sub count
-  const scoped = subQ
-    ? ok.filter(r => (r.sub_name || '').toLowerCase().includes(subQ) ||
-                     (r.sub_guid || '').toLowerCase().includes(subQ))
-    : ok;
-  const subSet = new Set();
-  for (const r of scoped) if (r.sub_guid) subSet.add(r.sub_guid);
-  const allSubSet = new Set();
-  for (const r of ok) if (r.sub_guid) allSubSet.add(r.sub_guid);
-  const scopeEl = $('#qgroups-scope');
-  if (scopeEl) {
-    scopeEl.textContent = subQ
-      ? `across ${subSet.size} of ${allSubSet.size} subs (filtered: "${subQ}")`
-      : `across all ${allSubSet.size} subs in run`;
-    scopeEl.classList.toggle('text-amber-300', !!subQ);
-    scopeEl.classList.toggle('text-slate-400', !subQ);
-  }
-
-  const agg = new Map();    // key → { group, sub_name, sub_guid, fams:Set, q, u, dQ, dU }
-  const keyOf = (group, sub_guid, sub_name) => bySub ? `${group}\u0001${sub_guid}` : group;
-
-  for (const r of scoped) {
-    if (familyCategory(r.vm_family) !== 'compute') continue;
-    if (ROLLUP_FAMS.has(r.vm_family)) continue;
-    const group = vmFamilyGroup(r.vm_family);
-    if (!group) continue;
-    const k = keyOf(group, r.sub_guid, r.sub_name);
-    let row = agg.get(k);
-    if (!row) {
-      row = { group, sub_name: r.sub_name, sub_guid: r.sub_guid,
-              fams: new Set(), q: 0, u: 0, dQ: 0, dU: 0, hasBaseline: false };
-      agg.set(k, row);
+async function loadQuotaGroups() {
+  try {
+    const r = await fetch('/api/quota-groups');
+    if (!r.ok) {
+      if (r.status === 401) { QUOTA_GROUPS_PAYLOAD = null; renderQuotaGroups(); return; }
+      QUOTA_GROUPS_PAYLOAD = { groups: [], errors: [`HTTP ${r.status}`], mgmt_groups: 0 };
+    } else {
+      QUOTA_GROUPS_PAYLOAD = await r.json();
     }
-    row.fams.add(r.vm_family);
-    row.q += r.current_quota || 0;
-    row.u += r.current_usage || 0;
-    if (BASELINE) {
-      const prev = BASELINE.rowsByKey.get(`${r.sub_guid}|${r.vm_family}`);
-      if (prev) {
-        row.dQ += (r.current_quota - prev.q);
-        row.dU += (r.current_usage - prev.u);
-        row.hasBaseline = true;
-      }
-    }
+  } catch (e) {
+    QUOTA_GROUPS_PAYLOAD = { groups: [], errors: [String(e)], mgmt_groups: 0 };
   }
-
-  // Compute totals from the FULL aggregated set (independent of hideZero) so the
-  // bottom row honestly reflects every quota group in the scoped subs, even ones
-  // we hide from view because they're zero on both sides.
-  const allRows = [...agg.values()];
-  let rows = allRows.slice();
-  if (hideZero) rows = rows.filter(r => r.q > 0 || r.u > 0);
-  rows.sort((a, b) => b.q - a.q);
-
-  // Color palette for groups (consistent across renders)
-  const groupColors = {
-    'General Purpose':    'text-sky-300',
-    'Compute Optimized':  'text-emerald-300',
-    'Memory Optimized':   'text-amber-300',
-    'Storage Optimized':  'text-violet-300',
-    'GPU':                'text-rose-300',
-    'HPC':                'text-orange-300',
-    'Confidential Compute':'text-cyan-300',
-    'Other / unclassified':'text-slate-400',
-  };
-
-  const dColor = (d) => d > 0 ? 'delta-pos' : d < 0 ? 'delta-neg' : 'delta-zero';
-  const sgn = (d) => (d > 0 ? '+' : '') + (d || 0).toLocaleString();
-  const pctClassRow = (p) => p >= 90 ? 'pct-hi' : p >= 70 ? 'pct-mid' : 'pct-lo';
-
-  tbody.innerHTML = rows.map(r => {
-    const p = r.q > 0 ? (r.u / r.q * 100) : 0;
-    const headroom = Math.max(0, r.q - r.u);
-    return `
-    <tr>
-      <td class="px-4 py-1.5 font-semibold ${groupColors[r.group] || 'text-slate-300'}">${escapeHtml(r.group)}</td>
-      ${bySub ? `<td class="px-4 py-1.5 qgroups-sub-col">
-        <div>${escapeHtml(r.sub_name || '(unnamed)')}</div>
-        <div class="guid">${r.sub_guid}</div>
-      </td>` : ''}
-      <td class="px-4 py-1.5 text-right tabular-nums text-slate-400">${r.fams.size}</td>
-      <td class="px-4 py-1.5 text-right tabular-nums text-emerald-400">${r.q.toLocaleString()}</td>
-      <td class="px-4 py-1.5 text-right tabular-nums cmp-col ${dColor(r.dQ)}">${r.hasBaseline ? sgn(r.dQ) : '—'}</td>
-      <td class="px-4 py-1.5 text-right tabular-nums text-sky-400">${r.u.toLocaleString()}</td>
-      <td class="px-4 py-1.5 text-right tabular-nums cmp-col ${dColor(r.dU)}">${r.hasBaseline ? sgn(r.dU) : '—'}</td>
-      <td class="px-4 py-1.5">
-        <div class="flex items-center gap-2">
-          <div class="bar-track flex-1"><div class="bar-fill ${pctClassRow(p)}" style="width:${Math.min(100, p)}%"></div></div>
-          <span class="text-xs w-12 text-right">${p.toFixed(1)}%</span>
-        </div>
-      </td>
-      <td class="px-4 py-1.5 text-right tabular-nums text-slate-300">${headroom.toLocaleString()}</td>
-    </tr>`;
-  }).join('');
-
-  // Aggregate totals across ALL groups (not just visible after hideZero) so the
-  // total is always the honest sum for the scoped subs.
-  const tot = allRows.reduce((a, r) => ({
-    q: a.q + r.q, u: a.u + r.u, dQ: a.dQ + r.dQ, dU: a.dU + r.dU,
-    fams: a.fams + r.fams.size,
-  }), { q: 0, u: 0, dQ: 0, dU: 0, fams: 0 });
-  const totPct = tot.q > 0 ? (tot.u / tot.q * 100) : 0;
-  const totHead = Math.max(0, tot.q - tot.u);
-  const groupLabel = (rows.length === allRows.length)
-    ? `${allRows.length} group${allRows.length === 1 ? '' : 's'}`
-    : `${rows.length} of ${allRows.length} groups shown`;
-  const subLabel = subQ
-    ? ` · ${subSet.size} of ${allSubSet.size} subs`
-    : ` · all ${allSubSet.size} subs`;
-
-  totalsRow.innerHTML = `
-    <td class="px-4 py-2">TOTAL · ${groupLabel}${subLabel}</td>
-    ${bySub ? '<td class="px-4 py-2 qgroups-sub-col"></td>' : ''}
-    <td class="px-4 py-2 text-right tabular-nums text-slate-400">${tot.fams.toLocaleString()}</td>
-    <td class="px-4 py-2 text-right tabular-nums text-emerald-400">${tot.q.toLocaleString()}</td>
-    <td class="px-4 py-2 text-right tabular-nums cmp-col ${dColor(tot.dQ)}">${BASELINE ? sgn(tot.dQ) : '—'}</td>
-    <td class="px-4 py-2 text-right tabular-nums text-sky-400">${tot.u.toLocaleString()}</td>
-    <td class="px-4 py-2 text-right tabular-nums cmp-col ${dColor(tot.dU)}">${BASELINE ? sgn(tot.dU) : '—'}</td>
-    <td class="px-4 py-2 text-right tabular-nums">${totPct.toFixed(1)}%</td>
-    <td class="px-4 py-2 text-right tabular-nums text-slate-300">${totHead.toLocaleString()}</td>
-  `;
-  applyCmpVisibility();
+  renderQuotaGroups();
 }
 
-['#qgroups-by-sub', '#qgroups-hide-zero'].forEach(s =>
-  document.querySelector(s)?.addEventListener('change', renderQuotaGroups));
-$('#qgroups-filter')?.addEventListener('input', renderQuotaGroups);
-$('#qgroups-clear')?.addEventListener('click', () => {
-  const el = $('#qgroups-filter');
-  if (el) { el.value = ''; renderQuotaGroups(); }
-});
+function renderQuotaGroups() {
+  const sec   = $('#qgroups-section');
+  const tbody = $('#qgroups-tbody');
+  const empty = $('#qgroups-empty');
+  const errEl = $('#qgroups-error');
+  const scope = $('#qgroups-scope');
+  if (!sec || !tbody) return;
+  sec.classList.remove('hidden');
+
+  const p = QUOTA_GROUPS_PAYLOAD;
+  if (!p) {
+    if (scope) scope.textContent = '(sign in to load)';
+    if (empty) empty.classList.add('hidden');
+    if (errEl) errEl.classList.add('hidden');
+    tbody.innerHTML = '';
+    return;
+  }
+
+  if (errEl) {
+    if (Array.isArray(p.errors) && p.errors.length) {
+      errEl.textContent = `⚠ ${p.errors.length} call(s) failed: ${p.errors[0]}`;
+      errEl.classList.remove('hidden');
+    } else {
+      errEl.classList.add('hidden');
+      errEl.textContent = '';
+    }
+  }
+
+  const groups = Array.isArray(p.groups) ? p.groups : [];
+  if (scope) {
+    scope.textContent = groups.length === 0
+      ? `0 group quotas across ${p.mgmt_groups || 0} management group(s)`
+      : `${groups.length} group${groups.length === 1 ? '' : 's'} across ${p.mgmt_groups} management group(s)`;
+  }
+
+  if (groups.length === 0) {
+    if (empty) empty.classList.remove('hidden');
+    tbody.innerHTML = '';
+    return;
+  }
+  if (empty) empty.classList.add('hidden');
+
+  // Flatten: one row per (group, quota). Groups with no quota allocations
+  // still get a single placeholder row so the user sees the group exists.
+  const rows = [];
+  for (const g of groups) {
+    const subs = Array.isArray(g.subscriptions) ? g.subscriptions : [];
+    const quotas = Array.isArray(g.quotas) ? g.quotas : [];
+    if (quotas.length === 0) {
+      rows.push({ g, q: null, sub_count: subs.length });
+      continue;
+    }
+    for (const q of quotas) rows.push({ g, q, sub_count: subs.length });
+  }
+
+  tbody.innerHTML = rows.map(({ g, q, sub_count }) => `
+    <tr class="hover:bg-slate-800/30">
+      <td class="px-4 py-1.5">
+        <div class="font-semibold text-emerald-300">${escapeHtml(g.group_display || g.group_name)}</div>
+        <div class="font-mono text-[10px] text-slate-500">${escapeHtml(g.group_name)}</div>
+      </td>
+      <td class="px-4 py-1.5">
+        <div class="text-slate-300">${escapeHtml(g.mgmt_group_display || g.mgmt_group_id)}</div>
+        <div class="font-mono text-[10px] text-slate-500">${escapeHtml(g.mgmt_group_id)}</div>
+      </td>
+      <td class="px-4 py-1.5 text-right tabular-nums text-slate-300">${sub_count.toLocaleString()}</td>
+      <td class="px-4 py-1.5 font-mono text-slate-200">${q ? escapeHtml(q.resource || q.name || '') : '<span class="text-slate-500">—</span>'}</td>
+      <td class="px-4 py-1.5 text-right tabular-nums text-emerald-400">${q && q.limit != null ? Number(q.limit).toLocaleString() : '<span class="text-slate-500">—</span>'}</td>
+      <td class="px-4 py-1.5 text-slate-400 text-[11px]">${q && q.unit ? escapeHtml(q.unit) : ''}</td>
+      <td class="px-4 py-1.5 text-slate-400 text-[11px]">${q && q.comment ? escapeHtml(q.comment) : ''}</td>
+    </tr>
+  `).join('');
+}
+
+$('#qgroups-refresh')?.addEventListener('click', loadQuotaGroups);
 
 // Trend chart listeners — debounce filter input so we don't spam /api/jobs/trend on each keystroke
 let TREND_DEBOUNCE = null;

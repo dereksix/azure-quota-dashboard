@@ -253,15 +253,30 @@ async def fetch_quota(client: httpx.AsyncClient, sub_guid: str, region: str, ser
                     "error": f"non-JSON: {je}", "elapsed": round(elapsed, 1)}
         # Adapt to internal SkuUsages-shape payload
         sku_usages = []
+        cores_row = None
+        seen_star = False
         for v in raw.get("value", []):
             name_obj = v.get("name") or {}
             family = name_obj.get("value") if isinstance(name_obj, dict) else str(name_obj)
             if not family:
                 continue
-            sku_usages.append({
+            entry = {
                 "VmFamily":     family,
                 "CurrentQuota": int(v.get("limit") or 0),
                 "CurrentUsage": int(v.get("currentValue") or 0),
+            }
+            sku_usages.append(entry)
+            if family == "cores":
+                cores_row = entry
+            elif family == "*":
+                seen_star = True
+        # ARM exposes the regional OD cap as `cores`; legacy callers expect `*`.
+        # Emit an alias so the frontend's regional-rollup logic works unchanged.
+        if cores_row and not seen_star:
+            sku_usages.append({
+                "VmFamily":     "*",
+                "CurrentQuota": cores_row["CurrentQuota"],
+                "CurrentUsage": cores_row["CurrentUsage"],
             })
         adapted = {
             "SubscriptionId":      sub_guid,
@@ -372,8 +387,13 @@ Resources
     cols = [c["name"] for c in body.get("data", {}).get("columns", [])]
     rg_rows = body.get("data", {}).get("rows", [])
 
+    region_lc = (region or "").lower()
     out_rows: list[dict] = []
     totals = {"od_cores": 0, "spot_cores": 0, "od_vms": 0, "spot_vms": 0}
+    # Other regions: VMs in the selected subs that AREN'T in the requested region.
+    # Surfaced separately so users see "you have spot elsewhere" without
+    # contaminating the in-scope inventory table.
+    other_by_region: dict[str, dict] = {}
     sku_meta_cache: dict[str, dict] = {}
     for row in rg_rows:
         d = dict(zip(cols, row))
@@ -382,7 +402,6 @@ Resources
         size     = d.get("size") or ""
         priority = d.get("priority") or "OD"
         vms      = int(d.get("vms") or 0)
-        # Resolve family + vCPUs per region, cached.
         if location and location not in sku_meta_cache:
             try:
                 sku_meta_cache[location] = await fetch_compute_sku_meta(
@@ -392,6 +411,18 @@ Resources
         meta = sku_meta_cache.get(location, {}).get(size.lower(), {})
         cores  = vms * int(meta.get("vCPUs") or 0)
         family = meta.get("family") or "(unknown)"
+        if region_lc and location != region_lc:
+            bucket = other_by_region.setdefault(location, {
+                "location": location,
+                "od_vms": 0, "od_cores": 0, "spot_vms": 0, "spot_cores": 0,
+            })
+            if priority == "Spot":
+                bucket["spot_vms"]   += vms
+                bucket["spot_cores"] += cores
+            else:
+                bucket["od_vms"]   += vms
+                bucket["od_cores"] += cores
+            continue
         out_rows.append({
             "sub_guid": sub_id, "location": location, "size": size,
             "family": family, "priority": priority,
@@ -404,7 +435,15 @@ Resources
             totals["od_cores"]   += cores
             totals["od_vms"]     += vms
 
-    return {"rows": out_rows, "totals": totals}
+    return {
+        "rows": out_rows,
+        "totals": totals,
+        "region": region_lc,
+        "other_regions": sorted(
+            other_by_region.values(),
+            key=lambda x: -(x["spot_cores"] + x["od_cores"]),
+        ),
+    }
 
 
 _sku_meta_cache: dict[str, dict] = {}
@@ -677,6 +716,112 @@ async def api_locations() -> JSONResponse:
             })
         out.sort(key=lambda x: (x.get("geography") or "", x.get("display_name") or ""))
     return JSONResponse(out)
+
+
+# ---------------------------------------------------------------------------
+# Microsoft.Quota Group Quotas (the real Azure construct, MG-scoped)
+# ---------------------------------------------------------------------------
+@app.get("/api/quota-groups")
+async def api_quota_groups() -> JSONResponse:
+    """Return real Microsoft.Quota Group Quotas the user can read.
+
+    Walks management groups the signed-in user has access to, then enumerates
+    `Microsoft.Quota/groupQuotas` under each. For each group, fetches member
+    subscriptions and quota allocations.
+
+    Empty list when the tenant has no quota groups configured (the common case).
+    Surfaces a structured `{ "groups": [...], "errors": [...], "mgmt_groups": N }`.
+    """
+    try:
+        token = get_token()
+    except Exception as e:
+        raise HTTPException(401, str(e))
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+    api_qg = "2025-03-15"        # Microsoft.Quota groupQuotas
+    api_mg = "2020-05-01"        # management groups list
+    out_groups: list[dict] = []
+    errors: list[str] = []
+    async with httpx.AsyncClient(timeout=30) as client:
+        # Step 1: list management groups (Reader at MG scope required).
+        url = f"{ARM_BASE}/providers/Microsoft.Management/managementGroups?api-version={api_mg}"
+        try:
+            r = await client.get(url, headers=headers)
+            r.raise_for_status()
+            mgs = r.json().get("value", [])
+        except httpx.HTTPStatusError as e:
+            return JSONResponse({
+                "groups": [],
+                "errors": [f"List management groups: HTTP {e.response.status_code}: {e.response.text[:200]}"],
+                "mgmt_groups": 0,
+            })
+        # Step 2: for each MG, enumerate groupQuotas.
+        for mg in mgs:
+            mg_id = mg.get("name") or ""
+            mg_display = mg.get("properties", {}).get("displayName") or mg_id
+            qg_url = (f"{ARM_BASE}/providers/Microsoft.Management/managementGroups/"
+                      f"{mg_id}/providers/Microsoft.Quota/groupQuotas?api-version={api_qg}")
+            try:
+                r = await client.get(qg_url, headers=headers)
+                if r.status_code == 404:
+                    continue        # No groups under this MG.
+                r.raise_for_status()
+                groups = r.json().get("value", [])
+            except httpx.HTTPStatusError as e:
+                # 403 is common (no Reader on this MG); silently skip those.
+                if e.response.status_code not in (403, 401):
+                    errors.append(f"MG {mg_id}: HTTP {e.response.status_code}: {e.response.text[:160]}")
+                continue
+            for g in groups:
+                gname = g.get("name") or ""
+                gprops = g.get("properties") or {}
+                gdisplay = gprops.get("displayName") or gname
+                # Pull member subscriptions.
+                sub_ids: list[str] = []
+                subs_url = (f"{ARM_BASE}/providers/Microsoft.Management/managementGroups/"
+                            f"{mg_id}/providers/Microsoft.Quota/groupQuotas/"
+                            f"{gname}/subscriptions?api-version={api_qg}")
+                try:
+                    rs = await client.get(subs_url, headers=headers)
+                    if rs.status_code == 200:
+                        for s in rs.json().get("value", []):
+                            sid = (s.get("name") or "").lower()
+                            if sid:
+                                sub_ids.append(sid)
+                except Exception:
+                    pass
+                # Pull quota allocations.
+                quotas: list[dict] = []
+                qurl = (f"{ARM_BASE}/providers/Microsoft.Management/managementGroups/"
+                        f"{mg_id}/providers/Microsoft.Quota/groupQuotas/"
+                        f"{gname}/quotas?api-version={api_qg}")
+                try:
+                    rq = await client.get(qurl, headers=headers)
+                    if rq.status_code == 200:
+                        for q in rq.json().get("value", []):
+                            qp = q.get("properties") or {}
+                            limit = qp.get("limit") or {}
+                            quotas.append({
+                                "name":         q.get("name"),
+                                "resource":     qp.get("resourceName") or q.get("name"),
+                                "limit":        limit.get("value") if isinstance(limit, dict) else limit,
+                                "unit":         qp.get("unit"),
+                                "comment":      qp.get("comment"),
+                            })
+                except Exception:
+                    pass
+                out_groups.append({
+                    "mgmt_group_id":      mg_id,
+                    "mgmt_group_display": mg_display,
+                    "group_name":         gname,
+                    "group_display":      gdisplay,
+                    "subscriptions":      sub_ids,
+                    "quotas":             quotas,
+                })
+    return JSONResponse({
+        "groups": out_groups,
+        "errors": errors,
+        "mgmt_groups": len(mgs),
+    })
 
 
 @app.get("/api/auth/status")
